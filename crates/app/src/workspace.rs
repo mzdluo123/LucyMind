@@ -347,7 +347,7 @@ impl WorkspaceView {
                 .text_color(rgb(theme::TEXT_DIM))
                 .child(SharedString::from("WORKTREES")),
         );
-        for wt in &self.worktrees {
+        for (i, wt) in self.worktrees.iter().enumerate() {
             let label = wt
                 .branch
                 .clone()
@@ -356,53 +356,65 @@ impl WorkspaceView {
             let is_active = self.active.as_deref() == Some(wt.path.as_path());
             // 本工具建的用 ● 实心,其它(用户手建/主仓)用 · 弱化。
             let marker = if ours { "●" } else { "·" };
+            let wt_path_for_click = wt.path.clone();
 
+            // 整行做成明显可点的列表项(仅本工具建的可点/可关)。
             let mut row = div()
+                .id(SharedString::from(format!("wt-{i}")))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(theme::space_sm())
-                .px(theme::space_xs())
+                // 左侧标记条:active 用冷白,否则透明——一眼看出当前在哪。
+                .border_l_2()
+                .border_color(if is_active {
+                    rgb(theme::TEXT_BRIGHT)
+                } else {
+                    rgb(theme::SURFACE) // 与底色同,视觉上"无"
+                })
+                .pl(theme::space_sm())
+                .pr(theme::space_xs())
                 .py(theme::space_xs())
-                .rounded(theme::radius())
                 .text_color(rgb(if ours { theme::TEXT } else { theme::TEXT_FAINT }));
 
-            // 当前活动项:抬升背景(无彩,靠明度)。
+            // active 抬升背景;可点项 hover 高亮(明确"能点")。
             if is_active {
                 row = row.bg(rgb(theme::SURFACE_RAISED));
             }
+            if ours {
+                row = row.cursor_pointer().hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
+                row = row.on_click(cx.listener(move |this, _ev, _w, cx| {
+                    this.active = Some(wt_path_for_click.clone());
+                    cx.notify();
+                }));
+            }
 
-            // marker + 分支名(占满;本工具建的可点切换到该终端)。
-            let wt_path_for_click = wt.path.clone();
-            let name_area = div()
-                .id(SharedString::from(format!("open-{}", label)))
-                .flex_1()
-                .flex()
-                .flex_row()
-                .gap(theme::space_sm())
-                .when(ours, |d| {
-                    d.cursor_pointer().on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.active = Some(wt_path_for_click.clone());
-                        cx.notify();
-                    }))
-                })
-                .child(SharedString::from(marker))
-                .child(SharedString::from(label.clone()));
-            row = row.child(name_area);
+            // marker + 分支名(占满宽度)。
+            row = row.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .gap(theme::space_sm())
+                    .child(SharedString::from(marker))
+                    .child(SharedString::from(label.clone())),
+            );
 
-            // 关闭按钮:仅本工具建的才给(避免误删用户手建的)。
+            // 关闭按钮 ✕:仅本工具建的才给(避免误删用户手建的)。
             if ours {
                 let close_path = wt.path.clone();
                 let close_branch = label.clone();
                 row = row.child(
                     div()
-                        .id(SharedString::from(format!("close-{}", label)))
+                        .id(SharedString::from(format!("close-{i}")))
                         .px(theme::space_xs())
                         .text_color(rgb(theme::TEXT_FAINT))
                         .cursor_pointer()
                         .hover(|s| s.text_color(rgb(theme::STATE_ERROR)))
                         .child(SharedString::from("✕"))
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        // 阻止冒泡:点 ✕ 不应同时触发整行的"切换"。
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| {
+                            let _ = ev;
                             this.request_close(close_path.clone(), close_branch.clone(), cx);
                         })),
                 );
