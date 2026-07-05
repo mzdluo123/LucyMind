@@ -5,6 +5,7 @@
 //! 建 worktree → postCreate hook → 在 worktree 起 agent → 显示在终端。
 
 mod terminal_view;
+mod theme;
 mod workspace;
 
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};

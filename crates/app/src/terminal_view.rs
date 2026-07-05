@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    div, fill, point, px, relative, rgb, rgba, size, App, AsyncApp, Bounds, ClipboardItem, Context,
+    div, fill, point, px, relative, rgb, size, App, AsyncApp, Bounds, ClipboardItem, Context,
     Element, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle, Focusable,
     GlobalElementId, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
@@ -24,10 +24,12 @@ use gpui::{
 use lucy_terminal::input::{self, Key, Mods};
 use lucy_terminal::{RenderSnapshot, TermDimensions, TermEvent, TerminalSession};
 
-const FONT_SIZE: f32 = 15.0;
+use crate::theme;
+
+const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 20.0;
-const DEFAULT_BG: u32 = 0x1e_1e_1e;
-const SELECTION_BG: u32 = 0x2e_54_88_80; // 半透明蓝,选区高亮
+/// 终端默认底色 —— 与主题主背景一致(near-black),终端字色仍来自 alacritty 调色板。
+const DEFAULT_BG: u32 = theme::BG;
 
 /// 网格坐标(视口行、列)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,7 +532,7 @@ fn paint_grid(
                         origin: point(x, y),
                         size: size(w, line_height),
                     },
-                    rgba(SELECTION_BG),
+                    theme::with_alpha(theme::SELECTION, theme::SELECTION_ALPHA),
                 ));
             }
         }
@@ -581,18 +583,16 @@ fn paint_grid(
         }
     }
 
-    // 光标块。
+    // 光标块(冷白半透明)。
     if snap.cursor.visible {
         let x = origin.x + cell_w * (snap.cursor.col as f32);
         let y = origin.y + line_height * (snap.cursor.line as f32);
-        let mut c = rgb(0xd4d4d4);
-        c.a = 0.5;
         window.paint_quad(fill(
             Bounds {
                 origin: point(x, y),
                 size: size(cell_w, line_height),
             },
-            c,
+            theme::with_alpha(theme::CURSOR, theme::CURSOR_ALPHA),
         ));
     }
 

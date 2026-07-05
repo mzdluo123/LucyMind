@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
+    div, prelude::*, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
     Render, SharedString, Styled, Window,
 };
 
@@ -17,13 +17,7 @@ use lucy_core::git::{self, CreateMode, WorktreeEntry};
 use lucy_core::hooks::{self, HookContext, LifecycleEvent};
 
 use crate::terminal_view::TerminalView;
-
-const BG_SIDEBAR: u32 = 0x25_25_26;
-const BG_MAIN: u32 = 0x1e_1e_1e;
-const FG: u32 = 0xd4_d4_d4;
-const FG_DIM: u32 = 0x85_85_85;
-const ACCENT: u32 = 0x4e_c9_b0;
-const ERR: u32 = 0xf1_4c_4c;
+use crate::theme;
 
 /// 一条状态消息(动作反馈 / 错误),显示在侧边栏底部。
 #[derive(Clone)]
@@ -154,89 +148,117 @@ impl WorkspaceView {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap_1();
+        let mut list = div().flex().flex_col();
 
-        // 标题。
+        // 标题 —— 冷白,克制,无彩。字号靠字重/间距立层级。
         list = list.child(
             div()
-                .text_color(rgb(ACCENT))
-                .child(SharedString::from("LucyMind"))
-                .mb_2(),
+                .text_color(rgb(theme::TEXT_BRIGHT))
+                .child(SharedString::from("LUCYMIND"))
+                .pb(theme::space_xs()),
         );
         list = list.child(
             div()
-                .text_color(rgb(FG_DIM))
-                .child(SharedString::from(format!(
-                    "repo: {}",
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(SharedString::from(
                     self.repo
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                )))
-                .mb_2(),
+                        .unwrap_or_default(),
+                ))
+                .pb(theme::space_md()),
         );
 
-        // 动作按钮:起 claude / codex。
+        // 动作按钮:无彩 —— 深灰底 + 细描边 + 2px 微圆角;悬浮/按下靠明度。
         for agent in ["claude", "codex"] {
             let name = agent.to_string();
             list = list.child(
                 div()
                     .id(SharedString::from(format!("new-{agent}")))
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(0x0e_63_9c))
-                    .text_color(rgb(0xff_ff_ff))
-                    .rounded_md()
+                    .mb(theme::space_xs())
+                    .px(theme::space_md())
+                    .py(theme::space_sm())
+                    .bg(rgb(theme::BTN_BG))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded(theme::radius())
+                    .text_color(rgb(theme::TEXT))
                     .cursor_pointer()
-                    .child(SharedString::from(format!("＋ New worktree → {agent}")))
+                    .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)).border_color(rgb(theme::TEXT_FAINT)))
+                    .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
+                    .child(SharedString::from(format!("+  new worktree · {agent}")))
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.new_worktree_and_agent(&name, cx);
                     })),
             );
         }
 
-        // worktree 列表。
+        // 分隔:worktree 段(用描边分隔线,不用颜色)。
         list = list.child(
             div()
-                .mt_3()
-                .text_color(rgb(FG_DIM))
-                .child(SharedString::from("Worktrees")),
+                .mt(theme::space_md())
+                .mb(theme::space_sm())
+                .border_b_1()
+                .border_color(rgb(theme::BORDER_SUBTLE))
+                .pb(theme::space_xs())
+                .text_color(rgb(theme::TEXT_DIM))
+                .child(SharedString::from("WORKTREES")),
         );
         for wt in &self.worktrees {
             let label = wt
                 .branch
                 .clone()
-                .unwrap_or_else(|| "(detached)".to_string());
+                .unwrap_or_else(|| "detached".to_string());
+            // 锁定态用文字标记而非彩色/emoji(无彩原则)。
+            let marker = if wt.locked { "●" } else { "·" };
             list = list.child(
                 div()
-                    .px_2()
-                    .py_1()
-                    .text_color(rgb(FG))
-                    .child(SharedString::from(format!(
-                        "{} {}",
-                        if wt.locked { "🔒" } else { "•" },
-                        label
-                    ))),
+                    .flex()
+                    .flex_row()
+                    .gap(theme::space_sm())
+                    .px(theme::space_xs())
+                    .py(theme::space_xs())
+                    .text_color(rgb(if wt.locked {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    }))
+                    .child(SharedString::from(marker))
+                    .child(SharedString::from(label)),
             );
         }
 
-        // 状态消息。
+        // 状态消息:仅错误保留极冷的语义红,否则用冷白。
         if let Some(status) = &self.status {
             list = list.child(
                 div()
-                    .mt_3()
-                    .p_2()
-                    .text_color(rgb(if status.is_error { ERR } else { ACCENT }))
+                    .mt(theme::space_md())
+                    .px(theme::space_sm())
+                    .py(theme::space_sm())
+                    .border_l_2()
+                    .border_color(rgb(if status.is_error {
+                        theme::STATE_ERROR
+                    } else {
+                        theme::TEXT_FAINT
+                    }))
+                    .text_color(rgb(if status.is_error {
+                        theme::STATE_ERROR
+                    } else {
+                        theme::TEXT_DIM
+                    }))
                     .child(status.text.clone()),
             );
         }
 
+        // 侧边栏:抬升表面 + 右侧描边(扁平层级靠描边)。
         div()
-            .w(px(260.0))
+            .w(gpui::px(248.0))
             .h_full()
-            .bg(rgb(BG_SIDEBAR))
-            .text_color(rgb(FG))
-            .p_3()
+            .bg(rgb(theme::SURFACE))
+            .border_r_1()
+            .border_color(rgb(theme::BORDER))
+            .text_color(rgb(theme::TEXT))
+            .p(theme::space_lg())
             .child(list)
     }
 }
@@ -257,11 +279,9 @@ impl Render for WorkspaceView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(BG_MAIN))
-                .text_color(rgb(FG_DIM))
-                .child(SharedString::from(
-                    "点击左侧「New worktree → claude/codex」开始",
-                ))
+                .bg(rgb(theme::BG))
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(SharedString::from("select an action to begin"))
                 .into_any_element(),
         };
 
@@ -269,7 +289,7 @@ impl Render for WorkspaceView {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(BG_MAIN))
+            .bg(rgb(theme::BG))
             .child(self.sidebar(cx))
             .child(main)
     }

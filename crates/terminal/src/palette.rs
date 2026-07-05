@@ -29,14 +29,15 @@ impl Rgb888 {
     }
 }
 
-/// 默认前景色 / 背景色(深色主题,贴近常见终端)。
-pub const DEFAULT_FG: Rgb888 = Rgb888::new(0xd4, 0xd4, 0xd4);
-pub const DEFAULT_BG: Rgb888 = Rgb888::new(0x1e, 0x1e, 0x1e);
-pub const DEFAULT_CURSOR: Rgb888 = Rgb888::new(0xd4, 0xd4, 0xd4);
+/// 默认前景色 / 背景色。冷深色性冷淡主题:near-black 底 + 冷灰字。
+/// (与 app 层 theme::BG / theme::TEXT 对齐,保证终端底色与外壳无缝。)
+pub const DEFAULT_FG: Rgb888 = Rgb888::new(0xc8, 0xc8, 0xce);
+pub const DEFAULT_BG: Rgb888 = Rgb888::new(0x0e, 0x0e, 0x10);
+pub const DEFAULT_CURSOR: Rgb888 = Rgb888::new(0xc8, 0xc8, 0xce);
 
 /// 标准 16 色(0..16):8 普通 + 8 亮色。取自常见终端配色。
 const ANSI_16: [Rgb888; 16] = [
-    Rgb888::new(0x1e, 0x1e, 0x1e), // 0 black
+    Rgb888::new(0x0e, 0x0e, 0x10), // 0 black(与主题底色一致)
     Rgb888::new(0xf1, 0x4c, 0x4c), // 1 red
     Rgb888::new(0x4e, 0xc9, 0xb0), // 2 green
     Rgb888::new(0xdc, 0xdc, 0xaa), // 3 yellow
