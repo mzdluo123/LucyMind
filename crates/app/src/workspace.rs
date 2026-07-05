@@ -364,28 +364,43 @@ impl WorkspaceView {
                 .pb(theme::space_md()),
         );
 
-        // 动作按钮:无彩 —— 深灰底 + 细描边 + 2px 微圆角;悬浮/按下靠明度。
-        for agent in ["claude", "codex"] {
+        // 动作按钮:图标 + 名字(Claude / Codex)。无彩 —— 深灰底 + 细描边 +
+        // 2px 微圆角;悬浮/按下靠明度。图标单色跟主题染色。
+        for (agent, display) in [("claude", "Claude"), ("codex", "Codex")] {
             let name = agent.to_string();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("new-{agent}")))
-                    .mb(theme::space_xs())
-                    .px(theme::space_md())
-                    .py(theme::space_sm())
-                    .bg(rgb(theme::BTN_BG))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .rounded(theme::radius())
-                    .text_color(rgb(theme::TEXT))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)).border_color(rgb(theme::TEXT_FAINT)))
-                    .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
-                    .child(SharedString::from(format!("+  new worktree · {agent}")))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.new_worktree_and_agent(&name, cx);
-                    })),
-            );
+            let icon = crate::assets::agent_icon(agent);
+            let mut btn = div()
+                .id(SharedString::from(format!("new-{agent}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(theme::space_sm())
+                .mb(theme::space_xs())
+                .px(theme::space_md())
+                .py(theme::space_sm())
+                .bg(rgb(theme::BTN_BG))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .rounded(theme::radius())
+                .text_color(rgb(theme::TEXT))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)).border_color(rgb(theme::TEXT_FAINT)))
+                .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)));
+
+            if let Some(path) = icon {
+                btn = btn.child(
+                    gpui::svg()
+                        .size(gpui::px(16.0))
+                        .path(path)
+                        .text_color(rgb(theme::TEXT)),
+                );
+            }
+            btn = btn.child(SharedString::from(display));
+
+            btn = btn.on_click(cx.listener(move |this, _ev, _window, cx| {
+                this.new_worktree_and_agent(&name, cx);
+            }));
+            list = list.child(btn);
         }
 
         // 分隔:worktree 段(用描边分隔线,不用颜色)。
@@ -509,7 +524,7 @@ impl WorkspaceView {
             );
         }
 
-        // 侧边栏:抬升表面 + 右侧描边(扁平层级靠描边)。
+        // 侧边栏:抬升表面 + 右侧描边(扁平层级靠描边)。整块用界面字体 Futura。
         div()
             .w(gpui::px(248.0))
             .h_full()
@@ -517,6 +532,7 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
+            .font_family(theme::FONT_UI)
             .p(theme::space_lg())
             .child(list)
     }

@@ -79,6 +79,12 @@ pub const STATE_ERROR: u32 = 0xb5_5c_5c;
 /// 成功(降饱和的冷绿)。
 pub const STATE_OK: u32 = 0x6f_9c_88;
 
+// ---- 字体 ----
+
+/// 界面字体(侧边栏/标题/按钮):Futura —— 几何无衬线、未来感,与 Orbitron
+/// 同源美学,系统自带。终端内容不用它(终端仍走 Menlo)。
+pub const FONT_UI: &str = "Futura";
+
 // ---- 形状 ----
 
 /// 统一圆角:2px 微圆角(硬朗但不割手)。
