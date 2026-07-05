@@ -50,13 +50,18 @@ impl AgentSpec {
 
     /// 用内置默认(claude / codex)构造规格 —— 当配置里没有对应 `[agents.*]` 时用。
     /// 未知名字返回 None。
+    ///
+    /// claude 默认带 `--dangerously-skip-permissions`:本工具就是「一键在隔离
+    /// worktree 里起 agent 干活」,每次都手动确认权限太碎。用户若想收回,在
+    /// `.worktree.toml` 里显式写 `[agents.claude]`(走 [`from_config`]),自己的
+    /// args 会完全覆盖此默认。
     pub fn builtin(name: &str, cwd: PathBuf, worktree_env: &[(String, String)]) -> Option<Self> {
-        let command = match name {
-            "claude" => "claude",
-            "codex" => "codex",
+        let (command, args): (&str, Vec<String>) = match name {
+            "claude" => ("claude", vec!["--dangerously-skip-permissions".to_string()]),
+            "codex" => ("codex", vec![]),
             _ => return None,
         };
-        Some(Self::build(name, command, vec![], cwd, worktree_env))
+        Some(Self::build(name, command, args, cwd, worktree_env))
     }
 
     /// 优先用配置预设,缺失则回落到内置默认。
@@ -125,9 +130,29 @@ mod tests {
     fn builtin_claude_and_codex_available_without_config() {
         let claude = AgentSpec::builtin("claude", PathBuf::from("/wt"), &[]).unwrap();
         assert_eq!(claude.command, "claude");
+        // claude 默认带 --dangerously-skip-permissions(见 builtin 文档)。
+        assert_eq!(claude.args, vec!["--dangerously-skip-permissions"]);
         let codex = AgentSpec::builtin("codex", PathBuf::from("/wt"), &[]).unwrap();
         assert_eq!(codex.command, "codex");
+        assert!(codex.args.is_empty());
         assert!(AgentSpec::builtin("unknown", PathBuf::from("/wt"), &[]).is_none());
+    }
+
+    #[test]
+    fn config_preset_overrides_default_claude_args() {
+        // 用户显式配 claude 且不带该参数 → 尊重用户,不强加默认。
+        let cfg = config::parse(
+            r#"
+            [agents.claude]
+            command = "claude"
+            args = ["--resume"]
+        "#,
+        )
+        .unwrap()
+        .config;
+
+        let spec = AgentSpec::resolve(&cfg, "claude", PathBuf::from("/wt"), &[]).unwrap();
+        assert_eq!(spec.args, vec!["--resume"]);
     }
 
     #[test]
