@@ -1,8 +1,10 @@
-//! 生命周期钩子引擎(事件 → 命令,环境变量注入)。完整实现见 U4。
+//! 生命周期钩子引擎(事件 → 命令,环境变量注入)。
+//!
+//! - [`events`] 事件枚举与执行上下文(环境变量注入,无模板)
+//! - [`engine`] copy + 顺序执行 shell 命令 + fail 策略
+
 mod engine;
 mod events;
 
-#[allow(unused_imports)] // stub 模块,U4 填实后移除
 pub use engine::*;
-#[allow(unused_imports)]
 pub use events::*;

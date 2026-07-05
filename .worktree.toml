@@ -1,0 +1,29 @@
+# LucyMind 自身的 worktree 配置(狗粮:用本工具开发本工具)。
+#
+# 上下文通过环境变量传给 hook,不使用模板占位符:
+#   $WORKTREE_PATH  $WORKTREE_BRANCH  $WORKTREE_NAME  $REPO_ROOT
+
+[worktree]
+location = "sibling"           # 仓库外兄弟目录,保持主仓干净
+dir = "../{repo}-worktrees"    # {repo} 仅用于目录名
+default_base = "main"
+
+[copy]
+# 本项目暂无未跟踪的本地配置需带入;有 .env 时在此声明。
+files = []
+
+[hooks]
+# 新 worktree 建好后:共享 target 目录加速编译(避免每个 worktree 重编 GPUI/wezterm)
+post_create = [
+    "echo 'CARGO_TARGET_DIR points at shared target to skip re-building GPUI/wezterm'",
+]
+pre_remove = []
+
+[hooks.options]
+fail_fast = true
+
+[agents.claude]
+command = "claude"
+
+[agents.codex]
+command = "codex"

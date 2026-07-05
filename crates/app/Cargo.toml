@@ -17,5 +17,6 @@ lucy-terminal.workspace = true
 anyhow.workspace = true
 log.workspace = true
 
-# U8-spike 将引入:
-# gpui = "0.2"   # 或 { git = "https://github.com/zed-industries/zed", rev = "<pin>" }
+# U8-spike:GPUI(pre-1.0)。先用 crates.io 版 pin 到 0.2.2 求可复现;
+# 若 API 缺失再改 git 依赖 zed 仓库。
+gpui = "0.2.2"
