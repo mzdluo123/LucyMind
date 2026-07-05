@@ -374,7 +374,7 @@ impl WorkspaceView {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(theme::space_sm())
+                .gap(theme::space_md())
                 .mb(theme::space_xs())
                 .px(theme::space_md())
                 .py(theme::space_sm())
