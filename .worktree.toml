@@ -27,3 +27,9 @@ command = "claude"
 
 [agents.codex]
 command = "codex"
+
+[alias]
+"lucy/session-40" = "hello-world"
+"lucy/session-43" = "好孩子"
+"lucy/session-44" = "1"
+"lucy/session-45" = "1"

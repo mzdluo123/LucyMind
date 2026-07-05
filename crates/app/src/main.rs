@@ -31,6 +31,9 @@ fn main() {
 
     // with_assets:注册内嵌 SVG 图标源,svg().path("icons/...") 才能加载。
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
+        // 初始化 gpui-component(其 Input 等组件依赖 theme/global 状态)。
+        gpui_component::init(cx);
+
         let bounds = Bounds::centered(None, size(px(1100.), px(680.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -45,7 +48,13 @@ fn main() {
                 app_id: Some("win.rainchan.lucymind".into()),
                 ..Default::default()
             },
-            move |_window, cx| cx.new(|cx| WorkspaceView::new(cx, candidate.clone())),
+            move |window, cx| {
+                // 把根视图包进 gpui-component 的 Root —— 它的 Input/弹层/焦点管理
+                // 依赖 Root 提供的全局上下文,否则渲染/聚焦 Input 会 panic。
+                let workspace = cx.new(|cx| WorkspaceView::new(cx, candidate.clone()));
+                let view: gpui::AnyView = workspace.into();
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            },
         )
         .unwrap();
         cx.activate(true);

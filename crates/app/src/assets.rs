@@ -13,6 +13,8 @@ use gpui::{AssetSource, SharedString};
 const CLAUDE_SVG: &[u8] = include_bytes!("../assets/icons/claude.svg");
 const CODEX_SVG: &[u8] = include_bytes!("../assets/icons/codex.svg");
 const LOGO_SVG: &[u8] = include_bytes!("../assets/icons/logo.svg");
+const FOLDER_GIT_SVG: &[u8] = include_bytes!("../assets/icons/folder-git-2.svg");
+const GIT_BRANCH_SVG: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -23,6 +25,8 @@ impl AssetSource for Assets {
             "icons/claude.svg" => Some(CLAUDE_SVG),
             "icons/codex.svg" => Some(CODEX_SVG),
             "icons/logo.svg" => Some(LOGO_SVG),
+            "icons/folder-git-2.svg" => Some(FOLDER_GIT_SVG),
+            "icons/git-branch.svg" => Some(GIT_BRANCH_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))

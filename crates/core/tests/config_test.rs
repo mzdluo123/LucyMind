@@ -106,6 +106,47 @@ fn resolve_sibling_dir_substitutes_repo_name() {
 }
 
 #[test]
+fn alias_set_read_roundtrip_preserves_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".worktree.toml");
+    // 带注释 + 已有配置的文件。
+    std::fs::write(
+        &path,
+        "# 我的注释\n[worktree]\ndefault_base = \"main\"\n",
+    )
+    .unwrap();
+
+    // 设别名。
+    config::set_alias(&path, "feature/x", "登录重构").unwrap();
+
+    // 读回:别名在,注释还在,原配置还在。
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("# 我的注释"), "注释应保留");
+    assert!(text.contains("default_base"), "原配置应保留");
+    let loaded = config::load(&path).unwrap();
+    assert_eq!(loaded.config.alias.get("feature/x").unwrap(), "登录重构");
+
+    // 改别名。
+    config::set_alias(&path, "feature/x", "新名字").unwrap();
+    let loaded = config::load(&path).unwrap();
+    assert_eq!(loaded.config.alias.get("feature/x").unwrap(), "新名字");
+
+    // 空串删除别名。
+    config::set_alias(&path, "feature/x", "").unwrap();
+    let loaded = config::load(&path).unwrap();
+    assert!(loaded.config.alias.get("feature/x").is_none());
+}
+
+#[test]
+fn set_alias_creates_file_if_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".worktree.toml");
+    config::set_alias(&path, "main", "主干").unwrap();
+    let loaded = config::load(&path).unwrap();
+    assert_eq!(loaded.config.alias.get("main").unwrap(), "主干");
+}
+
+#[test]
 fn inside_location_parses() {
     let text = r#"
         [worktree]

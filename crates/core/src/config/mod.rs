@@ -76,3 +76,33 @@ fn validate(config: &WorktreeConfig) -> Result<(), ConfigError> {
 pub fn resolve_sibling_dir(dir_template: &str, repo_name: &str) -> String {
     dir_template.replace("{repo}", repo_name)
 }
+
+/// 在 `.worktree.toml` 里设置某分支的别名(格式保留:用 toml_edit 只改 `[alias]`
+/// 表,不动用户的注释/其它配置)。`alias` 为空串则删除该别名。文件不存在则新建。
+pub fn set_alias(path: impl AsRef<Path>, branch: &str, alias: &str) -> Result<(), ConfigError> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| ConfigError::Validation(format!("解析 toml_edit 失败: {e}")))?;
+
+    // 确保 [alias] 表存在。
+    if !doc.contains_key("alias") {
+        doc["alias"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let table = doc["alias"]
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Validation("[alias] 不是表".into()))?;
+
+    if alias.trim().is_empty() {
+        table.remove(branch);
+    } else {
+        table[branch] = toml_edit::value(alias);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}

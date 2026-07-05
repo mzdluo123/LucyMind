@@ -187,22 +187,22 @@ fn lock_unlock_roundtrip() {
 }
 
 #[test]
-fn next_available_branch_skips_existing() {
-    let (_dir, repo) = init_repo();
-    // 先占用 session-1、session-2(模拟关闭 worktree 后残留的孤儿分支)。
-    run(&repo, &["branch", "lucy/session-1"]);
-    run(&repo, &["branch", "lucy/session-2"]);
-
-    // 应跳过已占用,给出 session-3。
-    let next = git::next_available_branch(&repo, "lucy/session-");
-    assert_eq!(next, "lucy/session-3");
+fn random_branch_name_format() {
+    let b = git::random_branch_name("lucy/session-");
+    // 形如 lucy/session-<adj>-<color>-<animal>-<nature>。
+    assert!(b.starts_with("lucy/session-"), "前缀不对: {b}");
+    let tail = b.strip_prefix("lucy/session-").unwrap();
+    let parts: Vec<&str> = tail.split('-').collect();
+    assert_eq!(parts.len(), 4, "应为四个短单词: {b}");
+    assert!(parts.iter().all(|p| !p.is_empty()), "词不应为空: {b}");
 }
 
 #[test]
-fn next_available_branch_from_empty() {
-    let (_dir, repo) = init_repo();
-    let next = git::next_available_branch(&repo, "lucy/session-");
-    assert_eq!(next, "lucy/session-1");
+fn random_branch_name_varies() {
+    // 连续生成应有差异(极小概率相同,多取几个降低偶然)。
+    let names: std::collections::HashSet<_> =
+        (0..8).map(|_| git::random_branch_name("x-")).collect();
+    assert!(names.len() >= 2, "随机分支名应有变化,得到: {names:?}");
 }
 
 #[test]

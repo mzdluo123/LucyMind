@@ -21,6 +21,7 @@ log.workspace = true
 # 若 API 缺失再改 git 依赖 zed 仓库。
 gpui = "0.2.2"
 env_logger = "0.11"
+gpui-component = "0.5.1"
 
 # cargo-bundle:打包成标准 macOS .app(补 Info.plist,让全屏/菜单栏/Dock
 # 等系统集成正常 —— 裸二进制缺这些)。`cargo bundle --release` 生成 .app。

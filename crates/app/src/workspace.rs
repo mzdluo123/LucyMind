@@ -79,8 +79,21 @@ pub struct WorkspaceView {
     status: Option<Status>,
     /// 待确认的关闭(有未提交改动时弹窗)。
     pending_close: Option<PendingClose>,
+    /// 侧边栏宽度(可拖 splitter 调整)。
+    sidebar_width: f32,
+    /// 正在拖 splitter 调侧边栏宽度。
+    dragging_splitter: bool,
+    /// 正在编辑别名的分支名(None = 未在编辑)。输入内容存 alias_input(InputState)。
+    editing_alias: Option<String>,
+    /// 别名输入框状态(gpui-component Input,带 IME + 选择)。懒创建。
+    alias_input: Option<gpui::Entity<gpui_component::input::InputState>>,
     focus: FocusHandle,
 }
+
+/// 侧边栏宽度范围。
+const SIDEBAR_MIN_W: f32 = 180.0;
+const SIDEBAR_MAX_W: f32 = 480.0;
+const SIDEBAR_DEFAULT_W: f32 = 248.0;
 
 impl WorkspaceView {
     /// 启动:给一个候选仓库路径(通常来自 cwd)。若它是有效 git 仓库则用,
@@ -100,6 +113,10 @@ impl WorkspaceView {
             active: None,
             status: None,
             pending_close: None,
+            sidebar_width: SIDEBAR_DEFAULT_W,
+            dragging_splitter: false,
+            editing_alias: None,
+            alias_input: None,
             focus: cx.focus_handle(),
         };
 
@@ -221,9 +238,10 @@ impl WorkspaceView {
             return;
         };
 
-        // 分支名避重:真查 git 找第一个空号(关闭不删分支,不能靠会归零的
-        // 内存计数,否则重启/清理后会撞名 —— 这正是 "branch already exists" 的根因)。
-        let branch = git::next_available_branch(&repo, "lucy/session-");
+
+        // 分支名:随机四词组合(如 lucy/session-brave-cyan-fox-moon),几乎不撞名,
+        // 零 git 探测(旧的逐个递增探测在大仓库要几百 ms)。撞名交 git add 兜底。
+        let branch = git::random_branch_name("lucy/");
         let base = self.config.worktree.default_base.clone();
 
         // worktree 路径:仓库外兄弟目录(按配置)。
@@ -236,14 +254,15 @@ impl WorkspaceView {
         let wt_path = git::sibling_worktree_path(&parent_dir, &branch);
 
         // 1) 建 worktree(带分支占用检查)。
-        if let Err(e) = git::add(
+        let add_res = git::add(
             &repo,
             &wt_path,
             &CreateMode::NewBranch {
                 branch: branch.clone(),
                 base,
             },
-        ) {
+        );
+        if let Err(e) = add_res {
             self.set_status(format!("建 worktree 失败:{e}"), true);
             return;
         }
@@ -315,35 +334,24 @@ impl WorkspaceView {
 
     /// 请求关闭:先停 agent + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
-        let t0 = std::time::Instant::now();
-        eprintln!("[close] request_close 开始 {}", wt_path.display());
-
         // 先停掉该终端的 agent(两段式)。用规范化 key 查。
-        let t = std::time::Instant::now();
         if let Some(term) = self.terminals.get(&canon(&wt_path)) {
             term.update(cx, |t, _| t.shutdown());
         }
-        eprintln!("[close] 停 agent(shutdown) 耗时 {:?}", t.elapsed());
 
         // 检查未提交改动。
-        let t = std::time::Instant::now();
         let dirty = git::has_uncommitted_changes(&wt_path).unwrap_or(false);
-        eprintln!("[close] has_uncommitted_changes 耗时 {:?} → {dirty}", t.elapsed());
 
         if dirty {
-            let t = std::time::Instant::now();
             let count = count_uncommitted(&wt_path);
-            eprintln!("[close] count_uncommitted 耗时 {:?} → {count}", t.elapsed());
             self.pending_close = Some(PendingClose {
                 dirty_count: count,
                 worktree_path: wt_path,
                 branch,
             });
             cx.notify();
-            eprintln!("[close] 弹确认,request_close 总耗时 {:?}", t0.elapsed());
         } else {
             self.do_close(&wt_path, false, cx);
-            eprintln!("[close] request_close 总耗时(含 do_close) {:?}", t0.elapsed());
         }
     }
 
@@ -576,24 +584,19 @@ impl WorkspaceView {
                 .child(SharedString::from("WORKTREES")),
         );
         for (i, wt) in self.worktrees.iter().enumerate() {
-            let label = wt
+            let branch = wt
                 .branch
                 .clone()
                 .unwrap_or_else(|| "detached".to_string());
+            // 显示名:有别名用别名,否则用分支名。别名存 .worktree.toml 的 [alias]。
+            let alias = self.config.alias.get(&branch).cloned();
+            let label = alias.clone().unwrap_or_else(|| branch.clone());
             let ours = self.is_ours(&wt.path);
             let is_main = self.is_main_repo(&wt.path);
             let is_active = self
                 .active
                 .as_deref()
                 .is_some_and(|a| same_path(a, &wt.path));
-            // ● = 本工具建的;· = 其它(主仓/手建)。仅视觉标记,不决定能否操作。
-            let marker = if is_main {
-                "◆" // 主仓用菱形区分
-            } else if ours {
-                "●"
-            } else {
-                "·"
-            };
             let wt_path_for_click = wt.path.clone();
 
             // 除主仓外都可点(切换/打开)、可关。
@@ -631,24 +634,60 @@ impl WorkspaceView {
                 }));
             }
 
-            // marker + 分支名(占满宽度)。
+            // 图标(Lucide git 图标,单色跟主题):main=folder-git,其余=git-branch。
+            let icon_path = if is_main {
+                "icons/folder-git-2.svg"
+            } else {
+                "icons/git-branch.svg"
+            };
+            row = row.child(
+                gpui::svg()
+                    .flex_none()
+                    .size(gpui::px(14.0))
+                    .path(icon_path)
+                    .text_color(rgb(if is_main {
+                        theme::TEXT_DIM
+                    } else if ours {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_FAINT
+                    })),
+            );
             row = row.child(
                 div()
                     .flex_1()
-                    .flex()
-                    .flex_row()
-                    .gap(theme::space_sm())
-                    .child(SharedString::from(marker))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .child(SharedString::from(label.clone())),
             );
 
-            // 关闭按钮 ✕:主仓外都给。
+            // ✎ 改别名 + ✕ 关闭:固定在行尾右对齐(flex_none,不被名字挤走)。
             if interactive {
+                let edit_branch = branch.clone();
+                let edit_init = alias.clone().unwrap_or_default();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("alias-{i}")))
+                        .flex_none()
+                        .px(theme::space_xs())
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(rgb(theme::TEXT)))
+                        .child(SharedString::from("✎"))
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            cx.stop_propagation();
+                            this.open_alias_editor(&edit_branch, &edit_init, window, cx);
+                        })),
+                );
+
                 let close_path = wt.path.clone();
-                let close_branch = label.clone();
+                let close_branch = branch.clone();
                 row = row.child(
                     div()
                         .id(SharedString::from(format!("close-{i}")))
+                        .flex_none()
                         .px(theme::space_xs())
                         .text_color(rgb(theme::TEXT_FAINT))
                         .cursor_pointer()
@@ -668,17 +707,26 @@ impl WorkspaceView {
 
         // (状态提示移到主区底部的状态栏,见 render —— 更像编辑器,不占侧边栏。)
 
-        // 侧边栏:抬升表面 + 右侧描边(扁平层级靠描边)。整块用界面字体 Futura。
+        // 侧边栏:宽度可拖(sidebar_width),内容可垂直滚动(worktree 多不溢出)。
+        // 右侧描边 = 视觉边界。整块用界面字体 Futura。
         div()
-            .w(gpui::px(248.0))
+            .flex_none()
+            .w(gpui::px(self.sidebar_width))
             .h_full()
             .bg(rgb(theme::SURFACE))
             .border_r_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
             .font_family(theme::FONT_UI)
-            .p(theme::space_lg())
-            .child(list)
+            .child(
+                // 可滚动内容区(id 是 overflow_y_scroll 的前提)。
+                div()
+                    .id("sidebar-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p(theme::space_lg())
+                    .child(list),
+            )
     }
 }
 
@@ -773,6 +821,150 @@ impl WorkspaceView {
             )
     }
 
+    /// 打开别名编辑器:懒创建 gpui-component 的 InputState,填入当前别名,聚焦。
+    fn open_alias_editor(
+        &mut self,
+        branch: &str,
+        init: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::InputState;
+        // 懒创建输入状态(需要 Window)。
+        if self.alias_input.is_none() {
+            self.alias_input = Some(cx.new(|cx| InputState::new(window, cx)));
+        }
+        if let Some(state) = &self.alias_input {
+            let init = init.to_string();
+            state.update(cx, |s, cx| {
+                s.set_value(init, window, cx);
+                s.focus(window, cx);
+            });
+        }
+        self.editing_alias = Some(branch.to_string());
+        cx.notify();
+    }
+
+    /// 别名编辑弹窗:用 gpui-component 的 Input(带 IME + 选择 + 复制粘贴)。
+    fn alias_dialog(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::input::Input;
+        let branch = self.editing_alias.clone().unwrap_or_default();
+        let input_el = self
+            .alias_input
+            .as_ref()
+            .map(|state| Input::new(state).into_any_element());
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::with_alpha(0x00_00_00, 0.55))
+            .child(
+                div()
+                    .w(gpui::px(380.0))
+                    .bg(rgb(theme::SURFACE))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded(theme::radius())
+                    .p(theme::space_lg())
+                    .flex()
+                    .flex_col()
+                    .gap(theme::space_md())
+                    .font_family(theme::FONT_UI)
+                    .child(
+                        div()
+                            .text_color(rgb(theme::TEXT_DIM))
+                            .child(SharedString::from(format!("为 {branch} 设置别名"))),
+                    )
+                    .children(input_el)
+                    .child(
+                        // 按钮行:取消 + 保存。
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(theme::space_sm())
+                            .child(
+                                div()
+                                    .id("alias-cancel")
+                                    .px(theme::space_md())
+                                    .py(theme::space_sm())
+                                    .bg(rgb(theme::BTN_BG))
+                                    .border_1()
+                                    .border_color(rgb(theme::BORDER))
+                                    .rounded(theme::radius())
+                                    .text_color(rgb(theme::TEXT))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+                                    .child(SharedString::from("取消"))
+                                    .on_click(_cx.listener(|this, _ev, _w, cx| {
+                                        this.editing_alias = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("alias-save")
+                                    .px(theme::space_md())
+                                    .py(theme::space_sm())
+                                    .bg(rgb(theme::BTN_BG))
+                                    .border_1()
+                                    .border_color(rgb(theme::STATE_OK))
+                                    .rounded(theme::radius())
+                                    .text_color(rgb(theme::STATE_OK))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+                                    .child(SharedString::from("保存"))
+                                    .on_click(_cx.listener(|this, _ev, _w, cx| {
+                                        this.commit_alias(cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    /// 从 InputState 读值,保存别名,关弹窗。
+    fn commit_alias(&mut self, cx: &mut Context<Self>) {
+        let Some(branch) = self.editing_alias.clone() else {
+            return;
+        };
+        let value = self
+            .alias_input
+            .as_ref()
+            .map(|s| s.read(cx).value().to_string())
+            .unwrap_or_default();
+        self.save_alias(&branch, value.trim());
+        self.editing_alias = None;
+        cx.notify();
+    }
+
+    /// 保存别名到 .worktree.toml 并重载配置。
+    fn save_alias(&mut self, branch: &str, alias: &str) {
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let path = repo.join(".worktree.toml");
+        match config::set_alias(&path, branch, alias) {
+            Ok(()) => {
+                // 重载配置(拿到新别名),刷新显示。
+                if let Ok(loaded) = config::load(&path) {
+                    self.config = loaded.config;
+                }
+                self.set_status(
+                    if alias.trim().is_empty() {
+                        format!("已清除 {branch} 的别名")
+                    } else {
+                        format!("已设别名 {branch} → {alias}")
+                    },
+                    false,
+                );
+            }
+            Err(e) => self.set_status(format!("保存别名失败:{e}"), true),
+        }
+    }
+
     /// 主区底部状态栏(编辑器风格:常驻、极细、克制)。空状态也占位以稳定布局。
     fn status_bar(&self) -> impl IntoElement {
         let (text, color) = match &self.status {
@@ -833,18 +1025,57 @@ impl Render for WorkspaceView {
             .child(term_area)
             .child(self.status_bar());
 
+        // 分隔条(splitter):侧边栏与主区之间,可拖调宽度。
+        let splitter = div()
+            .id("splitter")
+            .flex_none()
+            .w(gpui::px(4.0))
+            .h_full()
+            .bg(rgb(theme::BORDER))
+            .cursor_col_resize()
+            .hover(|s| s.bg(rgb(theme::TEXT_FAINT)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    this.dragging_splitter = true;
+                    cx.notify();
+                }),
+            );
+
         let mut root = div()
             .relative()
             .flex()
             .flex_row()
             .size_full()
             .bg(rgb(theme::BG))
+            // 拖 splitter 时:全局监听鼠标移动改宽度、抬起结束。
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _w, cx| {
+                if this.dragging_splitter {
+                    let w = f32::from(ev.position.x).clamp(SIDEBAR_MIN_W, SIDEBAR_MAX_W);
+                    this.sidebar_width = w;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    if this.dragging_splitter {
+                        this.dragging_splitter = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(self.sidebar(cx))
+            .child(splitter)
             .child(main);
 
         // 有待确认关闭 → 叠加确认弹窗。
         if self.pending_close.is_some() {
             root = root.child(self.confirm_dialog(cx));
+        }
+        // 正在编辑别名 → 叠加别名编辑弹窗。
+        if self.editing_alias.is_some() {
+            root = root.child(self.alias_dialog(cx));
         }
 
         root

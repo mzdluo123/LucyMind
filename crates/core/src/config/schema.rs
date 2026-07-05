@@ -94,4 +94,7 @@ pub struct WorktreeConfig {
     pub hooks: HooksSection,
     /// agent 预设表(键为 agent 名,如 `claude`/`codex`)。
     pub agents: std::collections::BTreeMap<String, AgentPreset>,
+    /// worktree 别名表:分支名 → 别名。用分支名作 key(worktree 路径每人本地
+    /// 不同,分支名才是共享稳定的)。
+    pub alias: std::collections::BTreeMap<String, String>,
 }

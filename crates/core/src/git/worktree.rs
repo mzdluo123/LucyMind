@@ -154,21 +154,58 @@ pub fn branch_exists(repo: impl AsRef<Path>, branch: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 从 `prefix` + 递增序号里找第一个**尚未被占用**的分支名。
-///
-/// 避重依据:分支已存在(`branch_exists`)。因为关闭 worktree 不删分支,
-/// 序号不能靠会归零的内存计数,必须真查 git —— 否则重启后会撞名。
-pub fn next_available_branch(repo: impl AsRef<Path>, prefix: &str) -> String {
-    let repo = repo.as_ref();
-    let mut n = 1;
-    loop {
-        let candidate = format!("{prefix}{n}");
-        if !branch_exists(repo, &candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
+/// 生成一个 `prefix` + 四个随机短单词(`-` 拼)的分支名,如
+/// `lucy/session-brave-cyan-fox-moon`。四词组合空间极大、几乎不撞,故**不做
+/// git 探测**(旧的逐个递增探测在大仓库下要几百 ms)。极小概率撞名交给 git add
+/// 报错兜底(调用方已处理 add 失败)。
+pub fn random_branch_name(prefix: &str) -> String {
+    let mut seed = seed_from_time();
+    let mut pick = |list: &[&'static str]| -> &'static str {
+        // xorshift 简单伪随机,不引 rand 依赖。
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        list[(seed as usize) % list.len()]
+    };
+    format!(
+        "{prefix}{}-{}-{}-{}",
+        pick(ADJECTIVES),
+        pick(COLORS),
+        pick(ANIMALS),
+        pick(NATURE),
+    )
 }
+
+/// 随机种子:系统时间纳秒 XOR 一个进程内自增计数 —— 保证同一纳秒内连续调用
+/// 也不同(否则紧密循环里会拿到同种子、同名)。无需可复现,不引 rand。
+fn seed_from_time() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9);
+    let c = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    (nanos ^ c).max(1) // 避免种子为 0(xorshift 会卡死在 0)
+}
+
+const ADJECTIVES: &[&str] = &[
+    "brave", "calm", "swift", "bold", "keen", "wise", "lucky", "quiet", "bright", "eager",
+    "gentle", "jolly", "merry", "noble", "proud", "sunny", "witty", "zesty", "cosmic", "electric",
+];
+const COLORS: &[&str] = &[
+    "amber", "azure", "coral", "crimson", "cyan", "gold", "indigo", "jade", "lime", "magenta",
+    "olive", "pearl", "ruby", "sage", "teal", "violet", "ivory", "onyx", "slate", "rose",
+];
+const ANIMALS: &[&str] = &[
+    "fox", "owl", "wolf", "hawk", "lynx", "otter", "seal", "crane", "raven", "moth",
+    "koi", "elk", "bear", "swan", "wren", "ibis", "puma", "orca", "toad", "yak",
+];
+const NATURE: &[&str] = &[
+    "moon", "reef", "dune", "peak", "grove", "creek", "cliff", "tide", "mist", "spark",
+    "ember", "frost", "storm", "vale", "fjord", "atoll", "delta", "ridge", "bloom", "leaf",
+];
 
 /// 便捷:清理已被手动删除但元数据残留的 worktree 记录。
 pub fn prune(repo: impl AsRef<Path>) -> Result<(), GitError> {
