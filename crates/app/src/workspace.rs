@@ -600,7 +600,8 @@ impl WorkspaceView {
             let wt_path_for_click = wt.path.clone();
 
             // 除主仓外都可点(切换/打开)、可关。
-            let interactive = !is_main;
+            // 所有行(含主仓)都可点开/切换;只有非主仓可关闭(主仓不是 worktree)。
+            let can_close = !is_main;
 
             let mut row = div()
                 .id(SharedString::from(format!("wt-{i}")))
@@ -627,12 +628,11 @@ impl WorkspaceView {
             if is_active {
                 row = row.bg(rgb(theme::SURFACE_RAISED));
             }
-            if interactive {
-                row = row.cursor_pointer().hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
-                row = row.on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.open_worktree(wt_path_for_click.clone(), cx);
-                }));
-            }
+            // 整行可点(含主仓)→ 打开/切换到该目录的终端。
+            row = row.cursor_pointer().hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
+            row = row.on_click(cx.listener(move |this, _ev, _w, cx| {
+                this.open_worktree(wt_path_for_click.clone(), cx);
+            }));
 
             // 图标(Lucide git 图标,单色跟主题):main=folder-git,其余=git-branch。
             let icon_path = if is_main {
@@ -663,8 +663,8 @@ impl WorkspaceView {
                     .child(SharedString::from(label.clone())),
             );
 
-            // ✎ 改别名 + ✕ 关闭:固定在行尾右对齐(flex_none,不被名字挤走)。
-            if interactive {
+            // ✎ 改别名:所有行(含主仓)都可设别名,固定行尾右对齐。
+            {
                 let edit_branch = branch.clone();
                 let edit_init = alias.clone().unwrap_or_default();
                 row = row.child(
@@ -681,7 +681,10 @@ impl WorkspaceView {
                             this.open_alias_editor(&edit_branch, &edit_init, window, cx);
                         })),
                 );
+            }
 
+            // ✕ 关闭:仅非主仓(主仓不是 worktree,不可关)。
+            if can_close {
                 let close_path = wt.path.clone();
                 let close_branch = branch.clone();
                 row = row.child(
