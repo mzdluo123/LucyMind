@@ -190,6 +190,12 @@ impl TerminalSession {
         let _ = self.loop_tx.send(Msg::Input(bytes.into()));
     }
 
+    /// 滚动 scrollback:正数向上回看历史,负数向下。
+    pub fn scroll_lines(&mut self, lines: i32) {
+        use alacritty_terminal::grid::Scroll;
+        self.term.lock().scroll_display(Scroll::Delta(lines));
+    }
+
     /// resize:同步给 Term 与 PTY。
     pub fn resize(&mut self, dimensions: TermDimensions) {
         self.dimensions = dimensions;
