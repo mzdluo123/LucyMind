@@ -27,6 +27,14 @@ struct Status {
     is_error: bool,
 }
 
+/// 规范化后比较两个路径(macOS /private 前缀、绝对/相对差异都能对上)。
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// 数某 worktree 的未提交改动条数(git status --porcelain 行数)。
 fn count_uncommitted(worktree: &std::path::Path) -> usize {
     std::process::Command::new("git")
@@ -95,9 +103,45 @@ impl WorkspaceView {
         }
     }
 
-    /// 该 worktree 是否由本工具建(据注册表)。
+    /// 该 worktree 是否由本工具建(据注册表)—— 仅用于 ●/· 标记,不作操作门槛。
     fn is_ours(&self, path: &std::path::Path) -> bool {
         self.registry.is_ours(&self.repo, path)
+    }
+
+    /// 是否是主仓库本身(主仓不是 worktree,不可关闭)。用规范化路径比较。
+    fn is_main_repo(&self, path: &std::path::Path) -> bool {
+        same_path(path, &self.repo)
+    }
+
+    /// 打开一个 worktree:已有终端则切过去;没有则在该目录起一个默认 shell。
+    fn open_worktree(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
+        if !self.terminals.contains_key(&wt_path) {
+            // 没有活动终端(存量 worktree)→ 起一个默认 shell 会话。
+            let wt_env = HookContext {
+                worktree_path: wt_path.clone(),
+                worktree_branch: String::new(),
+                worktree_name: wt_path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                repo_root: self.repo.clone(),
+            }
+            .env_vars();
+            let env: Vec<(String, String)> = std::iter::once(
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            )
+            .chain(wt_env)
+            .collect();
+
+            let cwd = wt_path.clone();
+            let terminal = cx.new(|cx| {
+                TerminalView::new(cx, Some(cwd), None, env)
+                    .expect("failed to start shell terminal")
+            });
+            self.terminals.insert(wt_path.clone(), terminal);
+        }
+        self.active = Some(wt_path);
+        cx.notify();
     }
 
     fn persist_registry(&self) {
@@ -353,39 +397,50 @@ impl WorkspaceView {
                 .clone()
                 .unwrap_or_else(|| "detached".to_string());
             let ours = self.is_ours(&wt.path);
+            let is_main = self.is_main_repo(&wt.path);
             let is_active = self.active.as_deref() == Some(wt.path.as_path());
-            // 本工具建的用 ● 实心,其它(用户手建/主仓)用 · 弱化。
-            let marker = if ours { "●" } else { "·" };
+            // ● = 本工具建的;· = 其它(主仓/手建)。仅视觉标记,不决定能否操作。
+            let marker = if is_main {
+                "◆" // 主仓用菱形区分
+            } else if ours {
+                "●"
+            } else {
+                "·"
+            };
             let wt_path_for_click = wt.path.clone();
 
-            // 整行做成明显可点的列表项(仅本工具建的可点/可关)。
+            // 除主仓外都可点(切换/打开)、可关。
+            let interactive = !is_main;
+
             let mut row = div()
                 .id(SharedString::from(format!("wt-{i}")))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(theme::space_sm())
-                // 左侧标记条:active 用冷白,否则透明——一眼看出当前在哪。
+                // 左侧标记条:active 冷白,否则与表面同色(视觉上"无")。
                 .border_l_2()
                 .border_color(if is_active {
                     rgb(theme::TEXT_BRIGHT)
                 } else {
-                    rgb(theme::SURFACE) // 与底色同,视觉上"无"
+                    rgb(theme::SURFACE)
                 })
                 .pl(theme::space_sm())
                 .pr(theme::space_xs())
                 .py(theme::space_xs())
-                .text_color(rgb(if ours { theme::TEXT } else { theme::TEXT_FAINT }));
+                .text_color(rgb(if is_main {
+                    theme::TEXT_DIM
+                } else {
+                    theme::TEXT
+                }));
 
-            // active 抬升背景;可点项 hover 高亮(明确"能点")。
             if is_active {
                 row = row.bg(rgb(theme::SURFACE_RAISED));
             }
-            if ours {
+            if interactive {
                 row = row.cursor_pointer().hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
                 row = row.on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.active = Some(wt_path_for_click.clone());
-                    cx.notify();
+                    this.open_worktree(wt_path_for_click.clone(), cx);
                 }));
             }
 
@@ -400,8 +455,8 @@ impl WorkspaceView {
                     .child(SharedString::from(label.clone())),
             );
 
-            // 关闭按钮 ✕:仅本工具建的才给(避免误删用户手建的)。
-            if ours {
+            // 关闭按钮 ✕:主仓外都给。
+            if interactive {
                 let close_path = wt.path.clone();
                 let close_branch = label.clone();
                 row = row.child(
@@ -412,9 +467,7 @@ impl WorkspaceView {
                         .cursor_pointer()
                         .hover(|s| s.text_color(rgb(theme::STATE_ERROR)))
                         .child(SharedString::from("✕"))
-                        // 阻止冒泡:点 ✕ 不应同时触发整行的"切换"。
-                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| {
-                            let _ = ev;
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
                             this.request_close(close_path.clone(), close_branch.clone(), cx);
                         })),
                 );
