@@ -404,14 +404,6 @@ impl RenderSnapshot {
             }
             let idx = vp.line * cols + vp.column.0;
 
-            // 宽字符右侧占位 / 行尾占位:保留为 width=0 占位(不画字符,但占列)。
-            if flags.contains(Flags::WIDE_CHAR_SPACER)
-                || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                grid[idx].width = 0;
-                continue;
-            }
-
             let fg = palette::resolve(cell.fg, colors).packed();
             let bg = palette::resolve(cell.bg, colors).packed();
             // INVERSE:前后景互换。
@@ -420,6 +412,18 @@ impl RenderSnapshot {
             } else {
                 (fg, bg)
             };
+
+            // 宽字符右侧占位 / 行尾占位:width=0 不画字符,但**必须继承本格背景**,
+            // 否则宽字符(中文)的背景/高亮块只覆盖左半格 —— alacritty 给 spacer
+            // 格填了和本体一致的颜色属性,直接取用即可,别丢弃。
+            if flags.contains(Flags::WIDE_CHAR_SPACER)
+                || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                grid[idx].bg = bg;
+                grid[idx].width = 0;
+                continue;
+            }
+
             let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
 
             grid[idx] = RenderCell {
