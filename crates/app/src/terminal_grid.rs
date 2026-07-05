@@ -1,35 +1,53 @@
-//! U8-spike 的核心:自绘 cell 网格。
+//! U8-spike 的核心:自绘 cell 网格(正确处理双宽字符)。
 //!
-//! 数据模型 [`StaticGrid`] 刻意做成「字符 + 前景色 + 背景色的二维 cell 数组」——
-//! 这正是 wezterm `Screen`/`Line`/`Cell` 在 U6/U8 会提供的信息形状,所以本
-//! spike 验证的绘制路线可以原样复用到真实内核上。
+//! 数据模型 [`StaticGrid`] 是「字符 + 前景色 + 背景色 + 宽度的二维 cell 数组」——
+//! 这正是 wezterm `Screen`/`Line`/`Cell` 的信息形状(wezterm 的 Cell 也带 width)。
 //!
-//! 绘制走 GPUI 的 `canvas` 元素:在 paint 回调里拿到 `bounds`,按 cell 宽高
-//! 逐格 `paint_quad(fill(...))` 画背景,再 `shape_line(...).paint(...)` 画字符。
+//! **宽字符处理**:CJK 等字符占 2 列。网格里:第一列放该字符(`width=2`),
+//! 紧邻的第二列放一个「续格」占位(`width=0`,不重复绘制)。绘制时按列索引
+//! × 单元宽度定位,双宽字符自然横跨两个 cell,不再和后文重叠。
 
 use gpui::{
     canvas, fill, point, px, rgb, size, App, Bounds, IntoElement, Pixels, SharedString, Styled,
     TextRun, Window,
 };
+use unicode_width::UnicodeWidthChar;
 
-/// 单个终端 cell:一个字符 + 前景色 + 背景色(RGB)。
+/// 单个终端 cell:字符 + 前景色 + 背景色 + 显示宽度(0/1/2)。
+///
+/// - `width == 1`:普通西文/半角。
+/// - `width == 2`:双宽字符(CJK 等),占据本格与右侧一格。
+/// - `width == 0`:双宽字符右侧的「续格」占位,不绘制字符。
 #[derive(Clone, Copy)]
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
     pub bg: u32,
+    pub width: u8,
 }
 
 impl Cell {
-    fn new(ch: char, fg: u32, bg: u32) -> Self {
-        Self { ch, fg, bg }
-    }
     fn blank() -> Self {
-        Self::new(' ', 0xd4d4d4, 0x1e1e1e)
+        Self {
+            ch: ' ',
+            fg: 0xd4d4d4,
+            bg: 0x1e1e1e,
+            width: 1,
+        }
+    }
+
+    /// 双宽字符右侧的续格。
+    fn continuation(bg: u32) -> Self {
+        Self {
+            ch: ' ',
+            fg: 0xd4d4d4,
+            bg,
+            width: 0,
+        }
     }
 }
 
-/// 一屏静态 cell 网格(rows × cols)。模拟 wezterm `Screen` 的可渲染内容。
+/// 一屏静态 cell 网格(rows × cols)。cols 是**显示列数**。
 pub struct StaticGrid {
     pub rows: usize,
     pub cols: usize,
@@ -45,35 +63,52 @@ impl StaticGrid {
         }
     }
 
-    #[cfg(test)] // 仅测试用于读取单元格
+    #[cfg(test)]
     fn at(&self, row: usize, col: usize) -> Cell {
         self.cells[row * self.cols + col]
     }
 
-    /// 在某行写一段带色文本(超出列宽截断)。spike 用来铺演示内容。
-    fn put_str(&mut self, row: usize, col: usize, s: &str, fg: u32, bg: u32) {
-        for (i, ch) in s.chars().enumerate() {
-            let c = col + i;
-            if c >= self.cols {
+    /// 在某行写一段带色文本,按**显示宽度**推进列(双宽字符占 2 列)。
+    /// 超出列宽则截断,绝不越界。
+    fn put_str(&mut self, row: usize, start_col: usize, s: &str, fg: u32, bg: u32) {
+        let mut col = start_col;
+        for ch in s.chars() {
+            let w = ch.width().unwrap_or(0);
+            if w == 0 {
+                continue; // 跳过零宽/控制字符
+            }
+            // 放不下(尤其双宽字符不能只放一半)则停止。
+            if col + w > self.cols {
                 break;
             }
-            self.cells[row * self.cols + c] = Cell::new(ch, fg, bg);
+            let idx = row * self.cols + col;
+            self.cells[idx] = Cell {
+                ch,
+                fg,
+                bg,
+                width: w as u8,
+            };
+            if w == 2 {
+                // 右侧续格:同背景色(让双宽字符的背景连贯),不绘制字符。
+                self.cells[idx + 1] = Cell::continuation(bg);
+            }
+            col += w;
         }
     }
 
-    /// 构造一屏演示内容:标题、几行带不同前景/背景色的文本,验证颜色渲染。
+    /// 构造一屏演示内容:含西文、CJK 双宽字符、彩色状态条,验证渲染正确。
     pub fn demo() -> Self {
-        let mut g = Self::new(16, 60);
-        g.put_str(0, 1, "LucyMind — U8 spike: 自绘终端网格 (wezterm-term 模型)", 0x4ec9b0, 0x1e1e1e);
+        let mut g = Self::new(16, 72);
+        g.put_str(0, 1, "LucyMind — U8 spike: 自绘终端网格 (wezterm 模型)", 0x4ec9b0, 0x1e1e1e);
         g.put_str(2, 1, "$ git worktree add ../proj-worktrees/feature-x", 0xd4d4d4, 0x1e1e1e);
         g.put_str(3, 1, "  Preparing worktree (new branch 'feature-x')", 0x9cdcfe, 0x1e1e1e);
         g.put_str(4, 1, "  HEAD is now at 34e57df scaffold", 0x9cdcfe, 0x1e1e1e);
-        g.put_str(6, 1, " OK  post_create hook 完成 ", 0x1e1e1e, 0x4ec9b0);
+        g.put_str(6, 1, " OK  post_create 钩子完成 ", 0x1e1e1e, 0x4ec9b0);
         g.put_str(7, 1, " WARN  分支已被检出,请换名 ", 0x1e1e1e, 0xdcdcaa);
         g.put_str(8, 1, " ERR  worktree 有未提交改动 ", 0xffffff, 0xf14c4c);
         g.put_str(10, 1, "$ claude", 0xd4d4d4, 0x1e1e1e);
-        g.put_str(11, 1, "  ● 会话已在 worktree 目录启动 (真 PTY)", 0xce9178, 0x1e1e1e);
-        g.put_str(13, 1, "红 绿 蓝 黄 青 洋红 — 颜色/中文宽字符测试", 0xd4d4d4, 0x1e1e1e);
+        g.put_str(11, 1, "  ● 会话已在 worktree 目录启动(真 PTY)", 0xce9178, 0x1e1e1e);
+        g.put_str(13, 1, "宽字符测试:中文 日本語 한국어 ← 各占两列", 0xd4d4d4, 0x1e1e1e);
         g.put_str(14, 1, "abcdefghijklmnopqrstuvwxyz 0123456789", 0x808080, 0x1e1e1e);
         g
     }
@@ -91,16 +126,12 @@ impl GridView {
 
     /// 产出一个占满可用空间、在 paint 回调里手绘网格的 canvas 元素。
     pub fn canvas_element(&self) -> impl IntoElement {
-        // 把网格数据 clone 进闭包(spike 数据量小,简单最好;U8 正式版会共享
-        // terminal session 的 Entity 而非 clone)。
         let cells = self.grid.cells.clone();
         let rows = self.grid.rows;
         let cols = self.grid.cols;
 
         canvas(
-            // prepaint:此 spike 无需预计算,返回 ()。
             move |_bounds, _window, _cx| (),
-            // paint:核心绘制。
             move |bounds: Bounds<Pixels>, _prepaint, window: &mut Window, cx: &mut App| {
                 paint_grid(&cells, rows, cols, bounds, window, cx);
             },
@@ -109,7 +140,8 @@ impl GridView {
     }
 }
 
-/// 逐格绘制:先量 cell 宽高,再画背景 quad + 字符。
+/// 逐格绘制:按列索引 × 单元宽度定位。双宽字符在起始列画一次,横跨两格;
+/// 续格(width==0)只画背景不画字符。
 fn paint_grid(
     cells: &[Cell],
     rows: usize,
@@ -121,44 +153,57 @@ fn paint_grid(
     let font_size = px(15.0);
     let line_height = px(20.0);
 
-    // 等宽字体的 cell 宽:shape 一个字符量其宽度。
+    // 单个西文 cell 的宽度:量一个半角字符。双宽字符 = 2 倍此宽。
     let probe = window
         .text_system()
         .shape_line("0".into(), font_size, &[monochrome_run(1, 0xd4d4d4)], None);
     let cell_w: Pixels = if probe.width > px(0.0) {
         probe.width
     } else {
-        px(9.0) // 兜底
+        px(9.0)
     };
 
     let origin = bounds.origin;
 
     for row in 0..rows {
         let y = origin.y + line_height * (row as f32);
-        if y > bounds.origin.y + bounds.size.height {
+        if y > origin.y + bounds.size.height {
             break;
         }
         for col in 0..cols {
             let cell = cells[row * cols + col];
             let x = origin.x + cell_w * (col as f32);
 
-            // 1) 背景 quad(仅当背景非默认底色时画,省开销)。
-            if cell.bg != 0x1e1e1e {
-                let cell_bounds = Bounds {
-                    origin: point(x, y),
-                    size: size(cell_w, line_height),
-                };
-                window.paint_quad(fill(cell_bounds, rgb(cell.bg)));
+            // 续格:不画字符(背景已在起始列随双宽字符处理时一并覆盖)。
+            if cell.width == 0 {
+                // 续格背景:若非默认底色,补画一格背景保证连贯。
+                if cell.bg != 0x1e1e1e {
+                    let b = Bounds {
+                        origin: point(x, y),
+                        size: size(cell_w, line_height),
+                    };
+                    window.paint_quad(fill(b, rgb(cell.bg)));
+                }
+                continue;
             }
 
-            // 2) 字符(跳过空格,省开销)。
+            // 背景 quad:双宽字符覆盖 2 格宽。
+            if cell.bg != 0x1e1e1e {
+                let span = cell_w * (cell.width as f32);
+                let b = Bounds {
+                    origin: point(x, y),
+                    size: size(span, line_height),
+                };
+                window.paint_quad(fill(b, rgb(cell.bg)));
+            }
+
+            // 字符(空格跳过)。
             if cell.ch != ' ' {
                 let text: SharedString = cell.ch.to_string().into();
                 let run = monochrome_run(text.len(), cell.fg);
                 let shaped = window
                     .text_system()
                     .shape_line(text, font_size, &[run], None);
-                // 垂直居中一点点:字符基线放在 cell 内。
                 let _ = shaped.paint(point(x, y), line_height, window, cx);
             }
         }
@@ -193,12 +238,36 @@ mod tests {
         g.put_str(0, 0, "abcdef", 0xffffff, 0x000000);
         assert_eq!(g.at(0, 0).ch, 'a');
         assert_eq!(g.at(0, 2).ch, 'c');
-        // 第 4 个字符被截断,不越界 panic。
     }
 
     #[test]
     fn blank_cells_are_spaces() {
         let g = StaticGrid::new(2, 2);
         assert_eq!(g.at(0, 0).ch, ' ');
+        assert_eq!(g.at(0, 0).width, 1);
+    }
+
+    #[test]
+    fn wide_char_occupies_two_columns() {
+        let mut g = StaticGrid::new(1, 6);
+        // "中a":中(宽2)在 col0,续格在 col1,a 在 col2。
+        g.put_str(0, 0, "中a", 0xffffff, 0x000000);
+        assert_eq!(g.at(0, 0).ch, '中');
+        assert_eq!(g.at(0, 0).width, 2);
+        assert_eq!(g.at(0, 1).width, 0); // 续格
+        assert_eq!(g.at(0, 2).ch, 'a');
+        assert_eq!(g.at(0, 2).width, 1);
+    }
+
+    #[test]
+    fn wide_char_not_split_at_boundary() {
+        // 宽度只剩 1 列时,双宽字符不能只放一半 —— 应整体截断。
+        let mut g = StaticGrid::new(1, 3);
+        g.put_str(0, 0, "a中", 0xffffff, 0x000000); // a 占 col0,中需 col1+col2 → 放得下
+        assert_eq!(g.at(0, 1).ch, '中');
+
+        let mut g2 = StaticGrid::new(1, 2);
+        g2.put_str(0, 1, "中", 0xffffff, 0x000000); // 从 col1 起,需 col1+col2,但 cols=2 → 放不下
+        assert_eq!(g2.at(0, 1).ch, ' '); // 未写入,保持空白
     }
 }
