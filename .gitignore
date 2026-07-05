@@ -6,6 +6,11 @@
 # 本工具的本地覆盖配置层(U11 预留;个人定制不入仓)
 .worktree.local.toml
 
+# worktree 目录:正常应建在仓库外兄弟目录,但兜底忽略,防止误建在项目内
+# 时被加进 git(如仓库根定位错导致落到子目录)。
+*-worktrees/
+.worktrees/
+
 # macOS
 .DS_Store
 
