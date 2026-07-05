@@ -66,8 +66,8 @@ struct PendingClose {
 }
 
 pub struct WorkspaceView {
-    /// 当前仓库根(MVP:启动时取的工作目录)。
-    repo: PathBuf,
+    /// 当前仓库根。None = 尚未选仓库(显示 pick a directory 空态)。
+    repo: Option<PathBuf>,
     config: WorktreeConfig,
     worktrees: Vec<WorktreeEntry>,
     /// 本工具开的 session 注册表(标记哪些 worktree 是我们建的)。
@@ -83,36 +83,82 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub fn new(cx: &mut Context<Self>, repo: PathBuf) -> Self {
-        let config = config::load(repo.join(".worktree.toml"))
-            .map(|l| l.config)
-            .unwrap_or_default();
-
-        let worktrees = git::list(&repo).unwrap_or_default();
-        // 加载本工具的 session 注册表(跨会话记住我们开过哪些)。
+    /// 启动:给一个候选仓库路径(通常来自 cwd)。若它是有效 git 仓库则用,
+    /// 否则以空态启动并自动弹目录选择器(.app 双击启动时 cwd 不是仓库的场景)。
+    pub fn new(cx: &mut Context<Self>, candidate: Option<PathBuf>) -> Self {
         let registry = Registry::load_default().unwrap_or_default();
 
-        Self {
-            repo,
-            config,
-            worktrees,
+        // 校验候选路径是否真的是 git 仓库。
+        let repo = candidate.and_then(|c| lucy_core::git::main_worktree_root(&c));
+
+        let mut this = Self {
+            repo: None,
+            config: WorktreeConfig::default(),
+            worktrees: Vec::new(),
             registry,
             terminals: std::collections::HashMap::new(),
             active: None,
             status: None,
             pending_close: None,
             focus: cx.focus_handle(),
+        };
+
+        match repo {
+            Some(r) => this.set_repo(r),
+            None => this.open_repo_picker(cx), // 无有效仓库 → 启动即弹目录选择器
         }
+        this
+    }
+
+    /// 设置仓库根:加载其配置、刷新 worktree 列表。
+    fn set_repo(&mut self, repo: PathBuf) {
+        let repo = canon(&repo);
+        self.config = config::load(repo.join(".worktree.toml"))
+            .map(|l| l.config)
+            .unwrap_or_default();
+        self.worktrees = git::list(&repo).unwrap_or_default();
+        self.repo = Some(repo);
+    }
+
+    /// 弹 native 目录选择器让用户选一个 git 仓库。选中后 set_repo。
+    fn open_repo_picker(&self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Git repository".into()),
+        });
+        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(dir) = paths.into_iter().next() {
+                    let _ = this.update(cx, |view, cx| {
+                        // 解析成主仓根(选的可能是仓库内子目录)。
+                        match lucy_core::git::main_worktree_root(&dir) {
+                            Some(root) => {
+                                view.set_repo(root);
+                                view.set_status("已打开仓库", false);
+                            }
+                            None => view.set_status("所选目录不是 git 仓库", true),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     /// 该 worktree 是否由本工具建(据注册表)—— 仅用于 ●/· 标记,不作操作门槛。
     fn is_ours(&self, path: &std::path::Path) -> bool {
-        self.registry.is_ours(&self.repo, path)
+        match &self.repo {
+            Some(r) => self.registry.is_ours(r, path),
+            None => false,
+        }
     }
 
     /// 是否是主仓库本身(主仓不是 worktree,不可关闭)。用规范化路径比较。
     fn is_main_repo(&self, path: &std::path::Path) -> bool {
-        same_path(path, &self.repo)
+        self.repo.as_deref().is_some_and(|r| same_path(path, r))
     }
 
     /// 打开一个 worktree:已有终端则切过去;没有则在该目录起一个默认 shell。
@@ -128,7 +174,7 @@ impl WorkspaceView {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                repo_root: self.repo.clone(),
+                repo_root: self.repo.clone().unwrap_or_default(),
             }
             .env_vars();
             let env: Vec<(String, String)> = std::iter::once(
@@ -162,29 +208,36 @@ impl WorkspaceView {
     }
 
     fn refresh_worktrees(&mut self) {
-        self.worktrees = git::list(&self.repo).unwrap_or_default();
+        self.worktrees = match &self.repo {
+            Some(r) => git::list(r).unwrap_or_default(),
+            None => Vec::new(),
+        };
     }
 
     /// 主流程:建 worktree → postCreate hook → 起 agent 到终端。
     fn new_worktree_and_agent(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        let Some(repo) = self.repo.clone() else {
+            self.set_status("请先打开一个 git 仓库", true);
+            return;
+        };
+
         // 分支名避重:真查 git 找第一个空号(关闭不删分支,不能靠会归零的
         // 内存计数,否则重启/清理后会撞名 —— 这正是 "branch already exists" 的根因)。
-        let branch = git::next_available_branch(&self.repo, "lucy/session-");
+        let branch = git::next_available_branch(&repo, "lucy/session-");
         let base = self.config.worktree.default_base.clone();
 
         // worktree 路径:仓库外兄弟目录(按配置)。
-        let repo_name = self
-            .repo
+        let repo_name = repo
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".into());
         let parent = config::resolve_sibling_dir(&self.config.worktree.dir, &repo_name);
-        let parent_dir = self.repo.join(&parent);
+        let parent_dir = repo.join(&parent);
         let wt_path = git::sibling_worktree_path(&parent_dir, &branch);
 
         // 1) 建 worktree(带分支占用检查)。
         if let Err(e) = git::add(
-            &self.repo,
+            &repo,
             &wt_path,
             &CreateMode::NewBranch {
                 branch: branch.clone(),
@@ -200,7 +253,7 @@ impl WorkspaceView {
             worktree_path: wt_path.clone(),
             worktree_branch: branch.clone(),
             worktree_name: branch.replace('/', "-"),
-            repo_root: self.repo.clone(),
+            repo_root: repo.clone(),
         };
         let run = hooks::run_event(
             LifecycleEvent::PostCreate,
@@ -239,11 +292,11 @@ impl WorkspaceView {
         self.active = Some(wt_key);
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
-        let _ = git::lock(&self.repo, &wt_path, Some("agent running"));
+        let _ = git::lock(&repo, &wt_path, Some("agent running"));
 
         // 5) 注册到 session 注册表(标记这是本工具建的)并持久化。
         self.registry.register(
-            &self.repo,
+            &repo,
             Session {
                 path: wt_path.clone(),
                 branch: branch.clone(),
@@ -295,6 +348,9 @@ impl WorkspaceView {
     /// 执行关闭:preRemove hook → unlock → remove(force?) → 移除记录 + 终端。
     fn do_close(&mut self, wt_path: &std::path::Path, force: bool, cx: &mut Context<Self>) {
         let wt_path = wt_path.to_path_buf();
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
 
         // 安全底线:绝不删主仓库(即便 UI 层漏了保护)。
         if self.is_main_repo(&wt_path) {
@@ -307,7 +363,7 @@ impl WorkspaceView {
         // 找分支名(供 hook 环境变量)。
         let branch = self
             .registry
-            .list_for_repo(&self.repo)
+            .list_for_repo(&repo)
             .into_iter()
             .find(|s| s.path == wt_path)
             .map(|s| s.branch)
@@ -318,7 +374,7 @@ impl WorkspaceView {
             worktree_path: wt_path.clone(),
             worktree_branch: branch.clone(),
             worktree_name: branch.replace('/', "-"),
-            repo_root: self.repo.clone(),
+            repo_root: repo.clone(),
         };
         hooks::run_event(
             LifecycleEvent::PreRemove,
@@ -329,16 +385,16 @@ impl WorkspaceView {
         );
 
         // 2) unlock(建时锁了)。
-        let _ = git::unlock(&self.repo, &wt_path);
+        let _ = git::unlock(&repo, &wt_path);
 
         // 3) remove。
-        if let Err(e) = git::remove(&self.repo, &wt_path, force) {
+        if let Err(e) = git::remove(&repo, &wt_path, force) {
             self.set_status(format!("删除 worktree 失败:{e}"), true);
             return;
         }
 
         // 4) 移除记录 + 终端 + active(用规范化 key)。
-        self.registry.unregister(&self.repo, &wt_path);
+        self.registry.unregister(&repo, &wt_path);
         self.persist_registry();
         let key = canon(&wt_path);
         self.terminals.remove(&key);
@@ -379,6 +435,51 @@ impl WorkspaceView {
                         .text_size(gpui::px(28.0)) // ≈ 3× 正文(正文 ~14)
                         .text_color(rgb(theme::TEXT_BRIGHT))
                         .child(SharedString::from("LUCYMIND")),
+                ),
+        );
+
+        // 仓库行:当前仓库名 + Open 按钮(切换/打开仓库)。
+        let repo_label = match &self.repo {
+            Some(r) => r
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".into()),
+            None => "no repository".into(),
+        };
+        list = list.child(
+            div()
+                .mb(theme::space_md())
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(theme::space_sm())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(rgb(theme::TEXT_DIM))
+                        .child(SharedString::from(repo_label)),
+                )
+                .child(
+                    div()
+                        .id("open-repo")
+                        .px(theme::space_sm())
+                        .py(theme::space_xs())
+                        .bg(rgb(theme::BTN_BG))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .rounded(theme::radius())
+                        .text_color(rgb(theme::TEXT))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+                        .child(SharedString::from("Open…"))
+                        .on_click(cx.listener(|this, _ev, _w, cx| {
+                            this.open_repo_picker(cx);
+                        })),
                 ),
         );
 
@@ -654,12 +755,15 @@ impl WorkspaceView {
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(color))
             .overflow_hidden()
-            // 单行 + 超长截断省略号,绝不换行(否则挤出固定高度看不到)。
+            // 单行 + 超长截断省略号,绝不换行。关键:flex 子项要 min_w_0 才会收缩,
+            // 否则默认 min-width:auto 会撑开导致换行/溢出。
             .child(
                 div()
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
                     .whitespace_nowrap()
-                    .truncate()
+                    .text_ellipsis()
                     .child(text),
             )
     }
