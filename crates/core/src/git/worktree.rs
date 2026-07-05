@@ -128,6 +128,24 @@ pub fn uses_submodules(repo: impl AsRef<Path>) -> bool {
     repo.as_ref().join(".gitmodules").is_file()
 }
 
+/// 从任意子目录解析出**主仓库工作树根**(`git rev-parse --show-toplevel`)。
+///
+/// 注意:在 worktree 内运行时,`--show-toplevel` 返回的是该 worktree 的根,
+/// 不是主仓。要拿主仓根用 [`main_worktree_root`]。这里用于"从项目任意子目录
+/// 启动也能定位仓库",而不是盲信当前目录。
+pub fn toplevel(dir: impl AsRef<Path>) -> Option<PathBuf> {
+    run_git(dir.as_ref(), &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| PathBuf::from(s.trim()))
+}
+
+/// 解析出**主仓库**根(不是当前 worktree 根)。用 `git worktree list` 的第一条
+/// (git 保证第一条是主工作树)。从子目录/worktree 内启动都能拿到正确主仓。
+pub fn main_worktree_root(dir: impl AsRef<Path>) -> Option<PathBuf> {
+    let list = list_worktrees(dir.as_ref()).ok()?;
+    list.into_iter().next().map(|e| e.path)
+}
+
 /// 某本地分支是否已存在(含被 worktree 删除后残留的孤儿分支)。
 pub fn branch_exists(repo: impl AsRef<Path>, branch: &str) -> bool {
     // `git branch --list <name>` 存在则输出该分支行,否则空。

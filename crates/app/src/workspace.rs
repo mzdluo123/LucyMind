@@ -295,6 +295,15 @@ impl WorkspaceView {
     /// 执行关闭:preRemove hook → unlock → remove(force?) → 移除记录 + 终端。
     fn do_close(&mut self, wt_path: &std::path::Path, force: bool, cx: &mut Context<Self>) {
         let wt_path = wt_path.to_path_buf();
+
+        // 安全底线:绝不删主仓库(即便 UI 层漏了保护)。
+        if self.is_main_repo(&wt_path) {
+            self.set_status("主仓库不可关闭", true);
+            self.pending_close = None;
+            cx.notify();
+            return;
+        }
+
         // 找分支名(供 hook 环境变量)。
         let branch = self
             .registry

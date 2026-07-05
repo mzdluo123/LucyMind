@@ -17,8 +17,13 @@ use workspace::WorkspaceView;
 fn main() {
     env_logger::init();
 
-    // 仓库根:当前工作目录(须是 git 仓库;否则 worktree 列表为空,仍可运行)。
-    let repo = std::env::current_dir().expect("cannot read current dir");
+    // 仓库根:从当前目录解析出**主仓库**根(git worktree list 第一条)。
+    // 不能盲信 current_dir —— 从子目录(如 crates/app/assets/icons)启动时它
+    // 不是仓库根,会导致 main 保护失效、误删主仓。解析失败(非 git 仓库)才回退。
+    let cwd = std::env::current_dir().expect("cannot read current dir");
+    let repo = lucy_core::git::main_worktree_root(&cwd)
+        .or_else(|| lucy_core::git::toplevel(&cwd))
+        .unwrap_or(cwd);
 
     // with_assets:注册内嵌 SVG 图标源,svg().path("icons/...") 才能加载。
     Application::new().with_assets(Assets).run(move |cx: &mut App| {

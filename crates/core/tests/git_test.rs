@@ -206,6 +206,35 @@ fn next_available_branch_from_empty() {
 }
 
 #[test]
+fn main_worktree_root_from_subdir() {
+    let (_dir, repo) = init_repo();
+    // 从子目录也应解析出主仓根,而非子目录本身。
+    let subdir = repo.join("crates/app");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    let root = git::main_worktree_root(&subdir).expect("should resolve main root");
+    assert!(same_path(&root, &repo), "{root:?} 应等于主仓 {repo:?}");
+}
+
+#[test]
+fn main_worktree_root_from_inside_worktree() {
+    let (dir, repo) = init_repo();
+    let wt = dir.path().join("wt-a");
+    git::add(
+        &repo,
+        &wt,
+        &CreateMode::NewBranch {
+            branch: "a".into(),
+            base: "main".into(),
+        },
+    )
+    .unwrap();
+    // 在 worktree 内解析,应仍指向主仓(不是这个 worktree)。
+    let root = git::main_worktree_root(&wt).expect("resolve");
+    assert!(same_path(&root, &repo), "worktree 内应解析到主仓");
+}
+
+#[test]
 fn branch_exists_detects() {
     let (_dir, repo) = init_repo();
     run(&repo, &["branch", "feature/x"]);
