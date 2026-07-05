@@ -87,11 +87,6 @@ impl TerminalView {
         })
     }
 
-    /// 供窗口初始化时聚焦用。
-    pub fn focus_handle_for_init(&self) -> FocusHandle {
-        self.focus.clone()
-    }
-
     /// 处理键盘输入:编码成字节写回 PTY。
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(bytes) = keystroke_to_bytes(&event.keystroke) {
