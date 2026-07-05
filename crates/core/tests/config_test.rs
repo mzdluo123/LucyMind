@@ -155,3 +155,90 @@ fn inside_location_parses() {
     let loaded = config::parse(text).expect("should parse");
     assert_eq!(loaded.config.worktree.location, Location::Inside);
 }
+
+#[test]
+fn settings_write_read_roundtrip_preserves_comments_and_alias() {
+    use lucy_core::config::EditableSettings;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".worktree.toml");
+    // 已有注释 + 别名 + agents 段的文件 —— 设置面板不该动它们。
+    std::fs::write(
+        &path,
+        "# 顶部注释\n[alias]\n\"feature/x\" = \"登录\"\n\n[agents.codex]\ncommand = \"codex\"\n",
+    )
+    .unwrap();
+
+    let s = EditableSettings {
+        location: Location::Inside,
+        dir: "../{repo}-wt".to_string(),
+        default_base: "develop".to_string(),
+        post_create: vec!["pnpm install".to_string(), "./setup.sh".to_string()],
+        pre_remove: vec!["./cleanup.sh".to_string()],
+        copy_files: vec![".env".to_string()],
+        fail_fast: false,
+    };
+    config::set_worktree_settings(&path, &s).unwrap();
+
+    // 读回:字段都对。
+    let loaded = config::load(&path).unwrap();
+    let c = &loaded.config;
+    assert_eq!(c.worktree.location, Location::Inside);
+    assert_eq!(c.worktree.dir, "../{repo}-wt");
+    assert_eq!(c.worktree.default_base, "develop");
+    assert_eq!(c.hooks.post_create, vec!["pnpm install", "./setup.sh"]);
+    assert_eq!(c.hooks.pre_remove, vec!["./cleanup.sh"]);
+    assert_eq!(c.copy.files, vec![".env"]);
+    assert!(!c.hooks.options.fail_fast);
+
+    // 注释 / 别名 / agents 都保留。
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("# 顶部注释"), "注释应保留");
+    assert_eq!(c.alias.get("feature/x").unwrap(), "登录");
+    assert_eq!(c.agents["codex"].command, "codex");
+
+    // from_config 抽回来的字段与写入一致(往返闭环)。
+    assert_eq!(EditableSettings::from_config(c), s);
+}
+
+#[test]
+fn settings_write_rejects_empty_sibling_dir() {
+    use lucy_core::config::EditableSettings;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".worktree.toml");
+    let s = EditableSettings {
+        location: Location::Sibling,
+        dir: "   ".to_string(), // 空白 → 非法
+        default_base: "main".to_string(),
+        post_create: vec![],
+        pre_remove: vec![],
+        copy_files: vec![],
+        fail_fast: true,
+    };
+    let err = config::set_worktree_settings(&path, &s).expect_err("empty sibling dir must fail");
+    assert!(matches!(err, config::ConfigError::Validation(_)));
+    // 校验失败不落盘。
+    assert!(!path.exists(), "校验失败不应写文件");
+}
+
+#[test]
+fn settings_write_creates_file_if_missing() {
+    use lucy_core::config::EditableSettings;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".worktree.toml");
+    let s = EditableSettings {
+        location: Location::Sibling,
+        dir: "../{repo}-worktrees".to_string(),
+        default_base: "main".to_string(),
+        post_create: vec![],
+        pre_remove: vec![],
+        copy_files: vec![],
+        fail_fast: true,
+    };
+    config::set_worktree_settings(&path, &s).unwrap();
+    assert!(path.exists());
+    let loaded = config::load(&path).unwrap();
+    assert_eq!(loaded.config.worktree.default_base, "main");
+}

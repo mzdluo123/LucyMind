@@ -106,3 +106,111 @@ pub fn set_alias(path: impl AsRef<Path>, branch: &str, alias: &str) -> Result<()
     std::fs::write(path, doc.to_string())?;
     Ok(())
 }
+
+/// 设置面板可编辑的字段(别名之外)。app 层组装后一次性写回,避免逐字段多次
+/// 读写文件。字符串数组字段(hook 命令 / copy 文件)传入已按行拆好的 Vec。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditableSettings {
+    pub location: Location,
+    pub dir: String,
+    pub default_base: String,
+    pub post_create: Vec<String>,
+    pub pre_remove: Vec<String>,
+    pub copy_files: Vec<String>,
+    pub fail_fast: bool,
+}
+
+impl EditableSettings {
+    /// 从已解析的配置里抽出可编辑字段(供设置面板初始化)。
+    pub fn from_config(config: &WorktreeConfig) -> Self {
+        Self {
+            location: config.worktree.location,
+            dir: config.worktree.dir.clone(),
+            default_base: config.worktree.default_base.clone(),
+            post_create: config.hooks.post_create.clone(),
+            pre_remove: config.hooks.pre_remove.clone(),
+            copy_files: config.copy.files.clone(),
+            fail_fast: config.hooks.options.fail_fast,
+        }
+    }
+}
+
+/// 把设置面板的字段写回 `.worktree.toml`(格式保留:用 toml_edit 只改涉及的
+/// key,保留用户的注释、其它段、别名)。文件不存在则新建。
+///
+/// 写前做与 [`load`] 同款的语义校验(如 sibling 必须有 dir),不合法则返回
+/// [`ConfigError::Validation`],不落盘。
+pub fn set_worktree_settings(
+    path: impl AsRef<Path>,
+    s: &EditableSettings,
+) -> Result<(), ConfigError> {
+    // 校验:与文件加载走同一套约束,避免写出一个自己都加载不了的配置。
+    if s.location == Location::Sibling && s.dir.trim().is_empty() {
+        return Err(ConfigError::Validation(
+            "location = \"sibling\" 时目录模板不能为空".to_string(),
+        ));
+    }
+
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| ConfigError::Validation(format!("解析 toml_edit 失败: {e}")))?;
+
+    // ---- [worktree] ----
+    let wt = ensure_table(&mut doc, "worktree")?;
+    wt["location"] = toml_edit::value(match s.location {
+        Location::Sibling => "sibling",
+        Location::Inside => "inside",
+    });
+    wt["dir"] = toml_edit::value(s.dir.as_str());
+    wt["default_base"] = toml_edit::value(s.default_base.as_str());
+
+    // ---- [copy] ----
+    let copy = ensure_table(&mut doc, "copy")?;
+    copy["files"] = string_array(&s.copy_files);
+
+    // ---- [hooks] ----
+    let hooks = ensure_table(&mut doc, "hooks")?;
+    hooks["post_create"] = string_array(&s.post_create);
+    hooks["pre_remove"] = string_array(&s.pre_remove);
+
+    // ---- [hooks.options] ----
+    // 嵌套子表:确保 hooks.options 存在再写 fail_fast。
+    let hooks_tbl = doc["hooks"]
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Validation("[hooks] 不是表".into()))?;
+    if !hooks_tbl.contains_key("options") {
+        hooks_tbl["options"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    hooks_tbl["options"]["fail_fast"] = toml_edit::value(s.fail_fast);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// 确保顶层表 `key` 存在并返回其可变引用(不存在则建空表)。
+fn ensure_table<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &str,
+) -> Result<&'a mut toml_edit::Item, ConfigError> {
+    if !doc.contains_key(key) {
+        doc[key] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if !doc[key].is_table() {
+        return Err(ConfigError::Validation(format!("[{key}] 不是表")));
+    }
+    Ok(&mut doc[key])
+}
+
+/// 把字符串 Vec 转成 toml_edit 的字符串数组 Item(空 Vec → 空数组 `[]`)。
+fn string_array(items: &[String]) -> toml_edit::Item {
+    let mut arr = toml_edit::Array::new();
+    for it in items {
+        arr.push(it.as_str());
+    }
+    toml_edit::value(arr)
+}

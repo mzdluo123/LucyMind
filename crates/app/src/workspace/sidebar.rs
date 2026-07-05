@@ -99,7 +99,8 @@ impl WorkspaceView {
             list = list.child(div().mb(theme::space_xs()).child(btn));
         }
 
-        // 分隔:worktree 段(用描边分隔线,不用颜色)。
+        // 分隔:worktree 段(用描边分隔线,不用颜色)。标题行右侧放齿轮按钮 ——
+        // 图形化编辑 .worktree.toml(别名之外的设置)。
         list = list.child(
             div()
                 .mt(theme::space_md())
@@ -107,8 +108,37 @@ impl WorkspaceView {
                 .border_b_1()
                 .border_color(rgb(theme::BORDER_SUBTLE))
                 .pb(theme::space_xs())
-                .text_color(rgb(theme::TEXT_DIM))
-                .child(SharedString::from("WORKTREES")),
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_color(rgb(theme::TEXT_DIM))
+                        .child(SharedString::from("WORKTREES")),
+                )
+                .child(
+                    // 齿轮:GPUI 的 svg() 是单色 mask,**必须**显式设 text_color
+                    // 才显形(不继承父 div 的 color),所以直接设在 svg 上。用
+                    // group-hover 让悬停整个按钮时齿轮变亮 —— 与 ✎/✕(纯文字、
+                    // 天然跟随父色)观感一致。
+                    div()
+                        .id("open-settings")
+                        .group("settings-btn")
+                        .flex_none()
+                        .px(theme::space_xs())
+                        .cursor_pointer()
+                        .child(
+                            gpui::svg()
+                                .size(gpui::px(14.0))
+                                .path("icons/settings.svg")
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .group_hover("settings-btn", |s| s.text_color(rgb(theme::TEXT))),
+                        )
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.open_settings(window, cx);
+                        })),
+                ),
         );
         for (i, wt) in self.worktrees.iter().enumerate() {
             list = list.child(self.worktree_row(i, wt, cx));

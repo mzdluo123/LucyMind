@@ -8,9 +8,11 @@
 //! 的 `impl` 方法,跨文件 impl):
 //! - [`sidebar`]     侧边栏(仓库 / Agents / worktree 列表)
 //! - [`dialogs`]     关闭确认 + 别名编辑弹窗
+//! - [`settings`]    `.worktree.toml` 图形化设置面板(别名之外的字段)
 //! - [`status_bar`]  主区底部状态栏
 
 mod dialogs;
+mod settings;
 mod sidebar;
 mod status_bar;
 
@@ -75,6 +77,21 @@ struct PendingClose {
     dirty_count: usize,
 }
 
+/// 设置面板的表单状态(打开设置弹窗时创建,含各输入框的 gpui-component
+/// InputState + 两个非文本项)。字段一一对应 [`config::EditableSettings`]。
+///
+/// 数组字段(hook 命令 / copy 文件)用多行 Input,一行一条;提交时按行拆分、
+/// 去掉空行。location / fail_fast 是非文本项,直接存值,点选切换。
+struct SettingsForm {
+    location: config::Location,
+    fail_fast: bool,
+    dir: gpui::Entity<gpui_component::input::InputState>,
+    default_base: gpui::Entity<gpui_component::input::InputState>,
+    post_create: gpui::Entity<gpui_component::input::InputState>,
+    pre_remove: gpui::Entity<gpui_component::input::InputState>,
+    copy_files: gpui::Entity<gpui_component::input::InputState>,
+}
+
 pub struct WorkspaceView {
     /// 当前仓库根。None = 尚未选仓库(显示 pick a directory 空态)。
     repo: Option<PathBuf>,
@@ -97,6 +114,8 @@ pub struct WorkspaceView {
     editing_alias: Option<String>,
     /// 别名输入框状态(gpui-component Input,带 IME + 选择)。懒创建。
     alias_input: Option<gpui::Entity<gpui_component::input::InputState>>,
+    /// 设置面板表单(Some = 设置弹窗打开中)。见 [`SettingsForm`]。
+    settings: Option<SettingsForm>,
     focus: FocusHandle,
 }
 
@@ -127,6 +146,7 @@ impl WorkspaceView {
             dragging_splitter: false,
             editing_alias: None,
             alias_input: None,
+            settings: None,
             focus: cx.focus_handle(),
         };
 
@@ -550,6 +570,10 @@ impl Render for WorkspaceView {
         // 正在编辑别名 → 叠加别名编辑弹窗。
         if self.editing_alias.is_some() {
             root = root.child(self.alias_dialog(cx));
+        }
+        // 设置面板打开中 → 叠加设置弹窗。
+        if self.settings.is_some() {
+            root = root.child(self.settings_dialog(cx));
         }
 
         root
