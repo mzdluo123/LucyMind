@@ -29,7 +29,18 @@ fn wait_for_text(session: &mut TerminalSession, needle: &str, timeout: Duration)
 /// 把 term 当前可渲染快照的字符拼成一个字符串(用于断言子串是否出现)。
 fn read_all_text(session: &TerminalSession) -> String {
     let snap = session.snapshot();
-    snap.cells.iter().map(|(_, _, cell)| cell.ch).collect()
+    let mut s = String::new();
+    for line in 0..snap.rows {
+        for col in 0..snap.cols {
+            let cell = snap.cell(line, col);
+            // width=0 是宽字符占位,跳过以免重复。
+            if cell.width != 0 {
+                s.push(cell.ch);
+            }
+        }
+        s.push('\n');
+    }
+    s
 }
 
 #[test]

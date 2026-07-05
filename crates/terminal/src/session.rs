@@ -257,8 +257,35 @@ pub struct RenderCell {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
-    /// 显示宽度:1 或 2(宽字符正身);spacer 已在快照中跳过,不会出现。
+    /// 显示宽度:
+    /// - `1` 普通字符
+    /// - `2` 宽字符正身(横跨本格与右格)
+    /// - `0` 宽字符右侧占位(spacer):渲染时不画字符,但**必须占位**以保持列对齐
     pub width: u8,
+}
+
+impl RenderCell {
+    /// 默认空白 cell(空格 + 默认前后景)。
+    fn blank() -> Self {
+        Self {
+            ch: ' ',
+            fg: palette::DEFAULT_FG.packed(),
+            bg: palette::DEFAULT_BG.packed(),
+            bold: false,
+            italic: false,
+            underline: false,
+            width: 1,
+        }
+    }
+
+    /// 是否与另一 cell 样式相同(供渲染 batching 判断能否合并成一个 run)。
+    pub fn same_style(&self, o: &RenderCell) -> bool {
+        self.fg == o.fg
+            && self.bg == o.bg
+            && self.bold == o.bold
+            && self.italic == o.italic
+            && self.underline == o.underline
+    }
 }
 
 /// 光标位置(视口行列)。
@@ -269,16 +296,31 @@ pub struct CursorPos {
     pub visible: bool,
 }
 
-/// 一屏可渲染快照。`cells` 是稀疏的:只含非空、非 spacer 的 cell,
-/// 每个带自己的视口 (line, col),app 层按此定位绘制。
+/// 一屏可渲染快照:**稠密**的 `rows × cols` 网格(row-major)。
+///
+/// 每个格子都有一个 [`RenderCell`](含空格),保证列严格连续——渲染时
+/// 按行从左到右走、把相邻同样式 cell 合并成一个文本 run 一次 `shape_line`
+/// (照 Zed 的 batching 做法),并用 `force_width` 把每格钉死在网格上。
+/// 这从根上避免「字符间歇性错位/多一格空隙」。
 #[derive(Debug, Clone)]
 pub struct RenderSnapshot {
     pub rows: usize,
     pub cols: usize,
-    /// (line, col, cell)。宽字符 spacer 已跳过;宽字符正身 width=2。
-    pub cells: Vec<(usize, usize, RenderCell)>,
+    /// 稠密网格,长度 = rows*cols,row-major。
+    pub grid: Vec<RenderCell>,
     pub cursor: CursorPos,
     pub display_offset: usize,
+}
+
+impl RenderSnapshot {
+    /// 读取某行某列的 cell(越界返回空白)。
+    pub fn cell(&self, line: usize, col: usize) -> RenderCell {
+        if line < self.rows && col < self.cols {
+            self.grid[line * self.cols + col]
+        } else {
+            RenderCell::blank()
+        }
+    }
 }
 
 impl RenderSnapshot {
@@ -290,51 +332,48 @@ impl RenderSnapshot {
         let rows = term.screen_lines();
         let cols = term.columns();
 
-        let mut cells = Vec::new();
+        // 稠密网格:先全填空白,再把每个 cell 放到它的精确列。
+        let mut grid = vec![RenderCell::blank(); rows * cols];
+
         for indexed in content.display_iter {
             let cell = indexed.cell;
             let flags = cell.flags;
 
-            // 宽字符右侧占位 / 行尾占位:跳过,由正身横跨两格绘制。
+            // 视口坐标(display_iter 只遍历可视区)。
+            let vp = alacritty_terminal::term::point_to_viewport(display_offset, indexed.point);
+            let Some(vp) = vp else { continue };
+            if vp.line >= rows || vp.column.0 >= cols {
+                continue;
+            }
+            let idx = vp.line * cols + vp.column.0;
+
+            // 宽字符右侧占位 / 行尾占位:保留为 width=0 占位(不画字符,但占列)。
             if flags.contains(Flags::WIDE_CHAR_SPACER)
                 || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
-                continue;
-            }
-            // 空格且默认背景:无需绘制(省开销)。
-            let bg = palette::resolve(cell.bg, colors).packed();
-            if cell.c == ' ' && bg == palette::DEFAULT_BG.packed() {
+                grid[idx].width = 0;
                 continue;
             }
 
-            // 视口坐标(display_iter 的 point.line 可能为负=scrollback,
-            // 但 display_iter 只遍历可视区,转成 0-based 行)。
-            let vp = alacritty_terminal::term::point_to_viewport(display_offset, indexed.point);
-            let Some(vp) = vp else { continue };
-
-            let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
             let fg = palette::resolve(cell.fg, colors).packed();
-
+            let bg = palette::resolve(cell.bg, colors).packed();
             // INVERSE:前后景互换。
             let (fg, bg) = if flags.contains(Flags::INVERSE) {
                 (bg, fg)
             } else {
                 (fg, bg)
             };
+            let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
 
-            cells.push((
-                vp.line,
-                vp.column.0,
-                RenderCell {
-                    ch: cell.c,
-                    fg,
-                    bg,
-                    bold: flags.intersects(Flags::BOLD | Flags::BOLD_ITALIC),
-                    italic: flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
-                    underline: flags.intersects(Flags::ALL_UNDERLINES),
-                    width,
-                },
-            ));
+            grid[idx] = RenderCell {
+                ch: cell.c,
+                fg,
+                bg,
+                bold: flags.intersects(Flags::BOLD | Flags::BOLD_ITALIC),
+                italic: flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
+                underline: flags.intersects(Flags::ALL_UNDERLINES),
+                width,
+            };
         }
 
         // 光标:落在宽字符 spacer 上时回退一列(照 alacritty 的做法)。
@@ -357,7 +396,7 @@ impl RenderSnapshot {
         Self {
             rows,
             cols,
-            cells,
+            grid,
             cursor,
             display_offset,
         }

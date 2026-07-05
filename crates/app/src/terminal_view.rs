@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui::{
     canvas, div, fill, point, px, rgb, size, App, AsyncApp, Bounds, Context, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, Pixels, Render,
-    SharedString, Styled, TextRun, WeakEntity, Window,
+    Styled, TextRun, WeakEntity, Window,
 };
 
 use lucy_terminal::input::{self, Key, Mods};
@@ -147,27 +147,51 @@ fn paint_snapshot(snap: &RenderSnapshot, bounds: Bounds<Pixels>, window: &mut Wi
 
     let origin = bounds.origin;
 
-    for (line, col, cell) in &snap.cells {
-        let x = origin.x + cell_w * (*col as f32);
-        let y = origin.y + line_height * (*line as f32);
+    // 逐行渲染。每行:
+    // 1) 先把所有非默认背景合并成尽量少的 quad(相邻同色合并)。
+    // 2) 再把整行文本合并成**一个** shaped line(每个 cell 一段 TextRun),
+    //    一次 shape + paint。这让字体在整行内连续排布,不会出现逐字符
+    //    shape 造成的间歇性间隙;宽字符占两格由 spacer(width=0)对齐。
+    for line in 0..snap.rows {
+        let y = origin.y + line_height * (line as f32);
 
-        // 背景(非默认底色才画;宽字符覆盖 2 格)。
-        if cell.bg != DEFAULT_BG {
-            let span = cell_w * (cell.width as f32);
+        // ---- 背景 pass:合并相邻同背景色的一段为一个 quad ----
+        let mut c = 0;
+        while c < snap.cols {
+            let bg = snap.cell(line, c).bg;
+            if bg == DEFAULT_BG {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < snap.cols && snap.cell(line, c).bg == bg {
+                c += 1;
+            }
+            let x = origin.x + cell_w * (start as f32);
+            let span = cell_w * ((c - start) as f32);
             let b = Bounds {
                 origin: point(x, y),
                 size: size(span, line_height),
             };
-            window.paint_quad(fill(b, rgb(cell.bg)));
+            window.paint_quad(fill(b, rgb(bg)));
         }
 
-        // 字符(空格跳过)。
-        if cell.ch != ' ' {
-            let text: SharedString = cell.ch.to_string().into();
-            let run = run_for(text.len(), cell.fg, cell.bold);
-            let shaped = window
-                .text_system()
-                .shape_line(text, font_size, &[run], None);
+        // ---- 文本 pass:逐 cell 绘制,每个字形钉在 col × cell_w ----
+        // 用真实等宽字体(Menlo)后,单字符 shape 的 advance 正确;按列定位
+        // 即可对齐网格。宽字符 spacer(width=0)跳过,正身自然占两格。
+        for col in 0..snap.cols {
+            let cell = snap.cell(line, col);
+            if cell.width == 0 || cell.ch == ' ' {
+                continue;
+            }
+            let x = origin.x + cell_w * (col as f32);
+            let mut buf = [0u8; 4];
+            let s = cell.ch.encode_utf8(&mut buf);
+            let run = run_for(s.len(), cell.fg, cell.bold);
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(s.to_string().into(), font_size, &[run], None);
             let _ = shaped.paint(point(x, y), line_height, window, cx);
         }
     }
@@ -187,9 +211,30 @@ fn paint_snapshot(snap: &RenderSnapshot, bounds: Bounds<Pixels>, window: &mut Wi
     }
 }
 
+/// 平台默认等宽字体名。**注意**:`"monospace"` 是 CSS 通用族名,
+/// macOS CoreText 无对应真实字体、解析会失败——必须用系统真实字体名。
+fn mono_font_family() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Menlo" // 系统自带,终端默认等宽字体
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "DejaVu Sans Mono"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Consolas"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        "monospace"
+    }
+}
+
 /// 造一个 TextRun(等宽字体,指定前景色 + 是否粗体)。
 fn run_for(len: usize, fg: u32, bold: bool) -> TextRun {
-    let mut font = gpui::font("monospace");
+    let mut font = gpui::font(mono_font_family());
     if bold {
         font = font.bold();
     }
