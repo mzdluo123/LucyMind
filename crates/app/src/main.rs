@@ -17,7 +17,13 @@ use assets::Assets;
 use workspace::WorkspaceView;
 
 fn main() {
-    env_logger::init();
+    // 默认:第三方 crate 只 warn,我们自己的 crate 开 info(能看到 [close] 计时
+    // 日志,又不被 gpui/wgpu 的 info 刷屏)。仍可被 RUST_LOG 覆盖。
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("warn,lucy_app=info,lucy_terminal=info,lucy_core=info"),
+    )
+    .init();
 
     // 候选仓库:当前工作目录。new() 会校验它是不是 git 仓库 —— 是则用(cargo run
     // 场景),否则以空态启动并弹目录选择器(.app 双击启动 cwd 不是仓库的场景)。

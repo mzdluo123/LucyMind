@@ -315,21 +315,35 @@ impl WorkspaceView {
 
     /// 请求关闭:先停 agent + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
+        let t0 = std::time::Instant::now();
+        eprintln!("[close] request_close 开始 {}", wt_path.display());
+
         // 先停掉该终端的 agent(两段式)。用规范化 key 查。
+        let t = std::time::Instant::now();
         if let Some(term) = self.terminals.get(&canon(&wt_path)) {
             term.update(cx, |t, _| t.shutdown());
         }
+        eprintln!("[close] 停 agent(shutdown) 耗时 {:?}", t.elapsed());
 
         // 检查未提交改动。
-        if git::has_uncommitted_changes(&wt_path).unwrap_or(false) {
+        let t = std::time::Instant::now();
+        let dirty = git::has_uncommitted_changes(&wt_path).unwrap_or(false);
+        eprintln!("[close] has_uncommitted_changes 耗时 {:?} → {dirty}", t.elapsed());
+
+        if dirty {
+            let t = std::time::Instant::now();
+            let count = count_uncommitted(&wt_path);
+            eprintln!("[close] count_uncommitted 耗时 {:?} → {count}", t.elapsed());
             self.pending_close = Some(PendingClose {
-                dirty_count: count_uncommitted(&wt_path),
+                dirty_count: count,
                 worktree_path: wt_path,
                 branch,
             });
             cx.notify();
+            eprintln!("[close] 弹确认,request_close 总耗时 {:?}", t0.elapsed());
         } else {
             self.do_close(&wt_path, false, cx);
+            eprintln!("[close] request_close 总耗时(含 do_close) {:?}", t0.elapsed());
         }
     }
 
@@ -345,7 +359,11 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// 执行关闭:preRemove hook → unlock → remove(force?) → 移除记录 + 终端。
+    /// 执行关闭:**乐观 UI + 后台跑慢 git**。
+    ///
+    /// 大仓库(如 superset)下 `git worktree remove` 本身要几百 ms,若同步跑会卡
+    /// UI 线程近 1 秒。所以:UI 立即移除该项(乐观),把 unlock/remove 挪到后台
+    /// 线程,完成后回主线程刷新列表。
     fn do_close(&mut self, wt_path: &std::path::Path, force: bool, cx: &mut Context<Self>) {
         let wt_path = wt_path.to_path_buf();
         let Some(repo) = self.repo.clone() else {
@@ -360,7 +378,7 @@ impl WorkspaceView {
             return;
         }
 
-        // 找分支名(供 hook 环境变量)。
+        // 找分支名(供 hook 环境变量 + 状态提示)。
         let branch = self
             .registry
             .list_for_repo(&repo)
@@ -369,7 +387,7 @@ impl WorkspaceView {
             .map(|s| s.branch)
             .unwrap_or_default();
 
-        // 1) preRemove hook。
+        // 1) preRemove hook(通常极快,同步跑)。
         let ctx = HookContext {
             worktree_path: wt_path.clone(),
             worktree_branch: branch.clone(),
@@ -384,27 +402,43 @@ impl WorkspaceView {
             |_step| {},
         );
 
-        // 2) unlock(建时锁了)。
-        let _ = git::unlock(&repo, &wt_path);
-
-        // 3) remove。
-        if let Err(e) = git::remove(&repo, &wt_path, force) {
-            self.set_status(format!("删除 worktree 失败:{e}"), true);
-            return;
-        }
-
-        // 4) 移除记录 + 终端 + active(用规范化 key)。
-        self.registry.unregister(&repo, &wt_path);
-        self.persist_registry();
+        // 2) 乐观 UI:立即从终端表/active/列表移除该项,界面瞬间响应。
         let key = canon(&wt_path);
         self.terminals.remove(&key);
         if self.active.as_deref().is_some_and(|a| same_path(a, &wt_path)) {
             self.active = self.terminals.keys().next().cloned();
         }
-
-        self.refresh_worktrees();
-        self.set_status(format!("已关闭 {branch}"), false);
+        self.worktrees.retain(|w| !same_path(&w.path, &wt_path));
+        self.registry.unregister(&repo, &wt_path);
+        self.persist_registry();
+        self.set_status(format!("正在关闭 {branch}…"), false);
         cx.notify();
+
+        // 3) 后台跑慢 git(unlock + remove),完成后回主线程刷新 + 报结果。
+        let repo_bg = repo.clone();
+        let wt_bg = wt_path.clone();
+        let branch_bg = branch.clone();
+        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            // 慢 git 放后台执行器(不占 UI 线程)。
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let _ = git::unlock(&repo_bg, &wt_bg);
+                    git::remove(&repo_bg, &wt_bg, force)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => view.set_status(format!("已关闭 {branch_bg}"), false),
+                    Err(e) => view.set_status(format!("删除 worktree 失败:{e}"), true),
+                }
+                // 用 git 真实状态刷新列表(纠正乐观移除的偏差)。
+                view.refresh_worktrees();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -621,6 +655,9 @@ impl WorkspaceView {
                         .hover(|s| s.text_color(rgb(theme::STATE_ERROR)))
                         .child(SharedString::from("✕"))
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            // 阻止冒泡到整行的 open_worktree —— 否则点 ✕ 会同时触发
+                            // 关闭 + 打开,行为打架。
+                            cx.stop_propagation();
                             this.request_close(close_path.clone(), close_branch.clone(), cx);
                         })),
                 );

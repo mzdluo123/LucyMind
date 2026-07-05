@@ -190,23 +190,28 @@ impl TerminalSession {
             return;
         }
         let pid = self.child_pid;
+        // 先发 SIGHUP(优雅),让子进程退出、EventLoop 有机会上报 ChildExit。
+        // SIGKILL 兜底放**后台线程**,不阻塞 UI —— 否则每次关闭 UI 死等 200ms 卡顿。
+        // Msg::Shutdown 也在后台线程延后发,避免 EventLoop 抢在 ChildExit 前就关闭。
+        let loop_tx = self.loop_tx.clone();
         if pid > 0 {
-            // 阶段一:SIGHUP(优雅)。
             unsafe {
                 libc::kill(pid, libc::SIGHUP);
             }
-            // 给它一点时间优雅退出。
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            // 阶段二:若还活着,SIGKILL。kill(pid, 0) 探测存活。
-            let alive = unsafe { libc::kill(pid, 0) == 0 };
-            if alive {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let alive = unsafe { libc::kill(pid, 0) == 0 };
+                if alive {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
                 }
-            }
+                // 收尾:通知 EventLoop 关闭(此时 ChildExit 大概率已上报)。
+                let _ = loop_tx.send(Msg::Shutdown);
+            });
+        } else {
+            let _ = loop_tx.send(Msg::Shutdown);
         }
-        // 通知 EventLoop 后台线程关闭。
-        let _ = self.loop_tx.send(Msg::Shutdown);
     }
 
     /// 锁定 Term 读取一份可渲染快照(cell 网格,含宽字符标志、颜色解析后)。
