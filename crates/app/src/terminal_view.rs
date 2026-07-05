@@ -128,6 +128,27 @@ impl TerminalView {
         self.session.shutdown();
     }
 
+    /// 若行列数变化则 resize PTY + Term(paint 时按 bounds 调用)。
+    /// cell 像素尺寸一并传给内核用于向终端程序报告像素尺寸。
+    fn maybe_resize(&mut self, cols: usize, rows: usize, cell_w: gpui::Pixels, line_h: gpui::Pixels) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let cur = self.session.dimensions();
+        if cur.columns == cols && cur.screen_lines == rows {
+            return; // 未变,避免每帧都 resize
+        }
+        let dims = TermDimensions::new(
+            cols,
+            rows,
+            f32::from(cell_w) as u16,
+            f32::from(line_h) as u16,
+        );
+        self.session.resize(dims);
+        // resize 后立刻刷新一次快照,避免旧尺寸残影。
+        self.snapshot = self.session.snapshot();
+    }
+
     // ---------------- 键盘 ----------------
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -517,11 +538,17 @@ impl Element for TerminalElement {
             px(9.0)
         };
 
-        // 回存尺寸/bounds 供鼠标映射。
+        // 按 bounds + cell 尺寸算出行列数,若变化则 resize PTY(让 claude/codex
+        // 收到 SIGWINCH 重新排版)。这是终端跟随窗口 resize 的关键。
+        let cols = (f32::from(bounds.size.width) / f32::from(cell_w)).floor() as usize;
+        let rows = (f32::from(bounds.size.height) / f32::from(line_height)).floor() as usize;
+
+        // 回存尺寸/bounds 供鼠标映射 + 按需 resize。
         self.view.update(cx, |v, _| {
             v.last_bounds = Some(bounds);
             v.cell_w = cell_w;
             v.line_h = line_height;
+            v.maybe_resize(cols, rows, cell_w, line_height);
         });
 
         paint_grid(&snap, selection, &preedit, bounds, cell_w, line_height, window, cx);
