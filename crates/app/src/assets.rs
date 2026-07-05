@@ -12,6 +12,7 @@ use gpui::{AssetSource, SharedString};
 /// 编译期内嵌的图标(路径 → 字节)。
 const CLAUDE_SVG: &[u8] = include_bytes!("../assets/icons/claude.svg");
 const CODEX_SVG: &[u8] = include_bytes!("../assets/icons/codex.svg");
+const LOGO_SVG: &[u8] = include_bytes!("../assets/icons/logo.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -21,6 +22,7 @@ impl AssetSource for Assets {
         let bytes: Option<&'static [u8]> = match path {
             "icons/claude.svg" => Some(CLAUDE_SVG),
             "icons/codex.svg" => Some(CODEX_SVG),
+            "icons/logo.svg" => Some(LOGO_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))

@@ -354,14 +354,19 @@ impl WorkspaceView {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col();
 
-        // 标题区 —— 大字标题(约 3× 正文),冷白,几何字体。底部描边线把标题区
-        // 与内容区清楚分隔(设计语言:分隔靠线 + 间距)。
+        // 标题区 —— logo + 大字标题(约 3× 正文),冷白,几何字体。底部描边线把
+        // 标题区与内容区清楚分隔(设计语言:分隔靠线 + 间距)。
         list = list.child(
             div()
                 .pb(theme::space_md())
                 .mb(theme::space_md())
                 .border_b_1()
                 .border_color(rgb(theme::BORDER))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(theme::space_sm())
+                .child(gpui::svg().size(gpui::px(28.0)).path("icons/logo.svg"))
                 .child(
                     div()
                         .text_size(gpui::px(28.0)) // ≈ 3× 正文(正文 ~14)
@@ -516,27 +521,7 @@ impl WorkspaceView {
             list = list.child(row);
         }
 
-        // 状态消息:仅错误保留极冷的语义红,否则用冷白。
-        if let Some(status) = &self.status {
-            list = list.child(
-                div()
-                    .mt(theme::space_md())
-                    .px(theme::space_sm())
-                    .py(theme::space_sm())
-                    .border_l_2()
-                    .border_color(rgb(if status.is_error {
-                        theme::STATE_ERROR
-                    } else {
-                        theme::TEXT_FAINT
-                    }))
-                    .text_color(rgb(if status.is_error {
-                        theme::STATE_ERROR
-                    } else {
-                        theme::TEXT_DIM
-                    }))
-                    .child(status.text.clone()),
-            );
-        }
+        // (状态提示移到主区底部的状态栏,见 render —— 更像编辑器,不占侧边栏。)
 
         // 侧边栏:抬升表面 + 右侧描边(扁平层级靠描边)。整块用界面字体 Futura。
         div()
@@ -642,24 +627,54 @@ impl WorkspaceView {
                     ),
             )
     }
+
+    /// 主区底部状态栏(编辑器风格:常驻、极细、克制)。空状态也占位以稳定布局。
+    fn status_bar(&self) -> impl IntoElement {
+        let (text, color) = match &self.status {
+            Some(s) if s.is_error => (s.text.clone(), theme::STATE_ERROR),
+            Some(s) => (s.text.clone(), theme::TEXT_DIM),
+            None => (SharedString::from(""), theme::TEXT_FAINT),
+        };
+        div()
+            .h(gpui::px(24.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(theme::space_md())
+            .bg(rgb(theme::SURFACE))
+            .border_t_1()
+            .border_color(rgb(theme::BORDER))
+            .text_color(rgb(color))
+            .child(text)
+    }
 }
 
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 主区:显示当前活动终端;无则占位。
-        let main: gpui::AnyElement = match self.active.as_ref().and_then(|p| self.terminals.get(p)) {
-            Some(term) => div().flex_1().h_full().child(term.clone()).into_any_element(),
-            None => div()
-                .flex_1()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(theme::BG))
-                .text_color(rgb(theme::TEXT_FAINT))
-                .child(SharedString::from("select an action to begin"))
-                .into_any_element(),
-        };
+        // 终端区(填满上方)。
+        let term_area: gpui::AnyElement =
+            match self.active.as_ref().and_then(|p| self.terminals.get(p)) {
+                Some(term) => div().flex_1().min_h_0().child(term.clone()).into_any_element(),
+                None => div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(theme::BG))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(SharedString::from("select an action to begin"))
+                    .into_any_element(),
+            };
+
+        // 主列:终端区 + 底部状态栏。
+        let main = div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(term_area)
+            .child(self.status_bar());
 
         let mut root = div()
             .relative()

@@ -351,7 +351,10 @@ pub struct RenderSnapshot {
     /// 稠密网格,长度 = rows*cols,row-major。
     pub grid: Vec<RenderCell>,
     pub cursor: CursorPos,
+    /// 当前滚动偏移(0 = 底部/最新)。
     pub display_offset: usize,
+    /// 总行数(可视 + scrollback 历史)。滚动条据此算滑块比例。
+    pub total_lines: usize,
 }
 
 impl RenderSnapshot {
@@ -373,6 +376,7 @@ impl RenderSnapshot {
 
         let rows = term.screen_lines();
         let cols = term.columns();
+        let total_lines = term.grid().total_lines(); // 可视 + scrollback
 
         // 稠密网格:先全填空白,再把每个 cell 放到它的精确列。
         let mut grid = vec![RenderCell::blank(); rows * cols];
@@ -441,6 +445,7 @@ impl RenderSnapshot {
             grid,
             cursor,
             display_offset,
+            total_lines,
         }
     }
 }

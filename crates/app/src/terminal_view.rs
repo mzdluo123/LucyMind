@@ -50,6 +50,8 @@ pub struct TerminalView {
     /// 选区(起点 cell, 终点 cell);None = 无选区。终点随拖动更新。
     selection: Option<(CellPos, CellPos)>,
     is_selecting: bool,
+    /// 正在拖动滚动条滑块。
+    dragging_scrollbar: bool,
 
     // ---- IME 预编辑状态 ----
     /// 预编辑串(组合中的拼音/假名);为空表示未在组合。commit 后清空并送 PTY。
@@ -115,6 +117,7 @@ impl TerminalView {
             exited: None,
             selection: None,
             is_selecting: false,
+            dragging_scrollbar: false,
             ime_preedit: String::new(),
             ime_marked: None,
             last_bounds: None,
@@ -257,8 +260,51 @@ impl TerminalView {
         })
     }
 
+    /// 鼠标 X 是否落在右侧滚动条区域(且当前有 scrollback)。
+    fn in_scrollbar(&self, pos: Point<Pixels>) -> bool {
+        let Some(bounds) = self.last_bounds else {
+            return false;
+        };
+        if self.snapshot.total_lines <= self.snapshot.rows {
+            return false; // 无滚动条
+        }
+        let right = bounds.origin.x + bounds.size.width;
+        pos.x >= right - px(SCROLLBAR_HIT_W) && pos.x <= right
+    }
+
+    /// 按鼠标 Y 在滚动条轨道上的比例,设置 display_offset(顶=最大,底=0)。
+    fn scroll_to_mouse_y(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bounds) = self.last_bounds else {
+            return;
+        };
+        let total = self.snapshot.total_lines;
+        let rows = self.snapshot.rows;
+        if total <= rows {
+            return;
+        }
+        let track_h = f32::from(bounds.size.height);
+        let rel_y = (f32::from(pos.y - bounds.origin.y)).clamp(0.0, track_h);
+        let frac_from_top = if track_h > 0.0 { rel_y / track_h } else { 0.0 };
+        let max_off = (total - rows) as i32;
+        // 顶部 = max_off,底部 = 0。
+        let target = (max_off as f32 * (1.0 - frac_from_top)).round() as i32;
+        let cur = self.snapshot.display_offset as i32;
+        let delta = target - cur;
+        if delta != 0 {
+            self.session.scroll_lines(delta);
+            self.snapshot = self.session.snapshot();
+            cx.notify();
+        }
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if ev.button != MouseButton::Left {
+            return;
+        }
+        // 滚动条区域:进入拖动模式,直接跳到点击位置。
+        if self.in_scrollbar(ev.position) {
+            self.dragging_scrollbar = true;
+            self.scroll_to_mouse_y(ev.position, cx);
             return;
         }
         if let Some(cell) = self.cell_at(ev.position) {
@@ -269,6 +315,10 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging_scrollbar {
+            self.scroll_to_mouse_y(ev.position, cx);
+            return;
+        }
         if self.is_selecting {
             if let Some(cell) = self.cell_at(ev.position) {
                 if let Some((start, _)) = self.selection {
@@ -281,6 +331,7 @@ impl TerminalView {
 
     fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
         self.is_selecting = false;
+        self.dragging_scrollbar = false;
         // 单击(起点==终点)视为清除选区。
         if let Some((a, b)) = self.selection {
             if a == b {
@@ -671,6 +722,54 @@ fn paint_grid(
                 .shape_line(preedit.to_string().into(), font_size_px(), &[run], None);
         let _ = shaped.paint(point(x, y), line_height, window, cx);
     }
+
+    // 滚动条:仅当有 scrollback(总行 > 可视行)才画。冷灰半透明细条,右侧。
+    if let Some((track, thumb)) = scrollbar_geometry(snap, bounds) {
+        // 轨道(极淡)。
+        window.paint_quad(fill(track, theme::with_alpha(theme::BORDER, 0.35)));
+        // 滑块(冷灰,悬浮态在 element 层再加深)。
+        window.paint_quad(fill(thumb, theme::with_alpha(theme::TEXT_FAINT, 0.9)));
+    }
+}
+
+/// 滚动条视觉宽度(像素)。
+const SCROLLBAR_W: f32 = 8.0;
+/// 滚动条命中宽度(比视觉略宽,便于抓取)。
+const SCROLLBAR_HIT_W: f32 = 14.0;
+
+/// 计算滚动条轨道与滑块的矩形。无 scrollback 返回 None(不画)。
+fn scrollbar_geometry(
+    snap: &RenderSnapshot,
+    bounds: Bounds<Pixels>,
+) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+    let rows = snap.rows;
+    let total = snap.total_lines;
+    if total <= rows {
+        return None; // 内容不足一屏,无需滚动条
+    }
+
+    let track_x = bounds.origin.x + bounds.size.width - px(SCROLLBAR_W);
+    let track = Bounds {
+        origin: point(track_x, bounds.origin.y),
+        size: size(px(SCROLLBAR_W), bounds.size.height),
+    };
+
+    let track_h = f32::from(bounds.size.height);
+    // 滑块高度 ∝ 可视/总,设最小高度避免太小点不到。
+    let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
+    // 偏移:display_offset=0 在底部,=max 在顶部。滑块位置从上到下。
+    let max_off = (total - rows) as f32;
+    let frac_from_top = if max_off > 0.0 {
+        1.0 - (snap.display_offset as f32 / max_off)
+    } else {
+        1.0
+    };
+    let thumb_y = bounds.origin.y + px((track_h - thumb_h) * frac_from_top);
+    let thumb = Bounds {
+        origin: point(track_x, thumb_y),
+        size: size(px(SCROLLBAR_W), px(thumb_h)),
+    };
+    Some((track, thumb))
 }
 
 fn font_size_px() -> Pixels {
