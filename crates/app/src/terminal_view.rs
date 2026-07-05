@@ -345,8 +345,29 @@ impl TerminalView {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / LINE_HEIGHT,
         };
-        if lines != 0.0 {
-            self.session.scroll_lines(lines as i32);
+        let n = lines as i32;
+        if n == 0 {
+            let _ = window;
+            return;
+        }
+
+        if self.snapshot.alt_screen {
+            // 备用屏(claude code/vim 等)无 scrollback —— 把滚轮转成方向键发给
+            // 程序,让它自己滚(alternate-scroll 行为)。上滚=↑,下滚=↓。
+            let (key, count) = if n > 0 {
+                (Key::Up, n)
+            } else {
+                (Key::Down, -n)
+            };
+            let mut bytes = Vec::new();
+            for _ in 0..count.min(10) {
+                // 单次滚轮最多转发 10 次,避免猛滚刷太多
+                bytes.extend_from_slice(&input::encode(&key, Mods::default()));
+            }
+            self.session.write_input(bytes);
+        } else {
+            // 主屏:滚 scrollback。
+            self.session.scroll_lines(n);
             self.snapshot = self.session.snapshot();
             cx.notify();
         }
@@ -724,12 +745,6 @@ fn paint_grid(
     }
 
     // 滚动条:仅当有 scrollback(总行 > 可视行)才画。冷灰半透明细条,右侧。
-    log::debug!(
-        "scrollbar: total_lines={} rows={} offset={}",
-        snap.total_lines,
-        snap.rows,
-        snap.display_offset
-    );
     if let Some((track, thumb)) = scrollbar_geometry(snap, bounds) {
         // 轨道(极淡)。
         window.paint_quad(fill(track, theme::with_alpha(theme::BORDER, 0.35)));

@@ -355,6 +355,9 @@ pub struct RenderSnapshot {
     pub display_offset: usize,
     /// 总行数(可视 + scrollback 历史)。滚动条据此算滑块比例。
     pub total_lines: usize,
+    /// 是否处于备用屏(alt-screen,如 claude code/vim/htop)。备用屏无 scrollback,
+    /// 滚轮应转发给程序而非滚 scrollback。
+    pub alt_screen: bool,
 }
 
 impl RenderSnapshot {
@@ -377,6 +380,9 @@ impl RenderSnapshot {
         let rows = term.screen_lines();
         let cols = term.columns();
         let total_lines = term.grid().total_lines(); // 可视 + scrollback
+        let alt_screen = term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
 
         // 稠密网格:先全填空白,再把每个 cell 放到它的精确列。
         let mut grid = vec![RenderCell::blank(); rows * cols];
@@ -446,6 +452,7 @@ impl RenderSnapshot {
             cursor,
             display_offset,
             total_lines,
+            alt_screen,
         }
     }
 }
