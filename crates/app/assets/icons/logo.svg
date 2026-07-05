@@ -1,6 +1,9 @@
 <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="46" cy="46" r="30" fill="#FFF"/>
-  <circle cx="28" cy="20" r="8"  fill="#FFF"/>
-  <circle cx="56" cy="54" r="20" fill="#000"/>
-  <circle cx="63" cy="49" r="3"  fill="#FFF"/>
+  <!-- GPUI 单色 mask 渲染:填充区=冷白,evenodd 挖空处=透明(露 near-black 背景,看着像黑点)。
+       外圈头 + 发髻同向(实心);右下角小圆反向(sweep-flag 相反)→ 被挖空。 -->
+  <path fill-rule="evenodd" d="
+    M 76 46 A 30 30 0 1 1 15.999 46 A 30 30 0 1 1 76 46 Z
+    M 36 20 A 8 8 0 1 1 19.999 20 A 8 8 0 1 1 36 20 Z
+    M 74 64 A 10 10 0 1 0 53.999 64 A 10 10 0 1 0 74 64 Z
+  "/>
 </svg>

@@ -724,6 +724,12 @@ fn paint_grid(
     }
 
     // 滚动条:仅当有 scrollback(总行 > 可视行)才画。冷灰半透明细条,右侧。
+    log::debug!(
+        "scrollbar: total_lines={} rows={} offset={}",
+        snap.total_lines,
+        snap.rows,
+        snap.display_offset
+    );
     if let Some((track, thumb)) = scrollbar_geometry(snap, bounds) {
         // 轨道(极淡)。
         window.paint_quad(fill(track, theme::with_alpha(theme::BORDER, 0.35)));

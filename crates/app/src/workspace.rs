@@ -366,7 +366,14 @@ impl WorkspaceView {
                 .flex_row()
                 .items_center()
                 .gap(theme::space_sm())
-                .child(gpui::svg().size(gpui::px(28.0)).path("icons/logo.svg"))
+                // GPUI 的 svg() 是单色 mask,必须设 text_color 才显形(且多色 SVG
+                // 会被填成单色剪影)。冷白填充。
+                .child(
+                    gpui::svg()
+                        .size(gpui::px(42.0)) // 1.5× 标题字号
+                        .path("icons/logo.svg")
+                        .text_color(rgb(theme::TEXT_BRIGHT)),
+                )
                 .child(
                     div()
                         .text_size(gpui::px(28.0)) // ≈ 3× 正文(正文 ~14)
