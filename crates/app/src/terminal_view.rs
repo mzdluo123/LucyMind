@@ -400,6 +400,9 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .size_full()
             .bg(rgb(DEFAULT_BG))
+            // 左右留白,让终端内容不贴边(element 的 bounds 会随 padding 内缩,
+            // 行列计算/鼠标映射/绘制全部基于内缩后的 bounds,自洽无需改坐标)。
+            .px(theme::space_sm())
             .child(self.element(cx))
     }
 }
