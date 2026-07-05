@@ -8,8 +8,8 @@
 //! 逐格 `paint_quad(fill(...))` 画背景,再 `shape_line(...).paint(...)` 画字符。
 
 use gpui::{
-    canvas, fill, point, px, rgb, size, App, Bounds, IntoElement, Pixels, SharedString, TextRun,
-    Window,
+    canvas, fill, point, px, rgb, size, App, Bounds, IntoElement, Pixels, SharedString, Styled,
+    TextRun, Window,
 };
 
 /// 单个终端 cell:一个字符 + 前景色 + 背景色(RGB)。
@@ -45,6 +45,7 @@ impl StaticGrid {
         }
     }
 
+    #[cfg(test)] // 仅测试用于读取单元格
     fn at(&self, row: usize, col: usize) -> Cell {
         self.cells[row * self.cols + col]
     }
