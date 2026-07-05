@@ -354,23 +354,28 @@ impl WorkspaceView {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col();
 
-        // 标题 —— 冷白,克制,无彩。字号靠字重/间距立层级。
+        // 标题区 —— 大字标题(约 3× 正文),冷白,几何字体。底部描边线把标题区
+        // 与内容区清楚分隔(设计语言:分隔靠线 + 间距)。
         list = list.child(
             div()
-                .text_color(rgb(theme::TEXT_BRIGHT))
-                .child(SharedString::from("LUCYMIND"))
-                .pb(theme::space_xs()),
+                .pb(theme::space_md())
+                .mb(theme::space_md())
+                .border_b_1()
+                .border_color(rgb(theme::BORDER))
+                .child(
+                    div()
+                        .text_size(gpui::px(28.0)) // ≈ 3× 正文(正文 ~14)
+                        .text_color(rgb(theme::TEXT_BRIGHT))
+                        .child(SharedString::from("LUCYMIND")),
+                ),
         );
+
+        // 区域标签:Agents —— 标示下方是 agent 会话区(与 WORKTREES 标签同样式)。
         list = list.child(
             div()
-                .text_color(rgb(theme::TEXT_FAINT))
-                .child(SharedString::from(
-                    self.repo
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                ))
-                .pb(theme::space_md()),
+                .mb(theme::space_sm())
+                .text_color(rgb(theme::TEXT_DIM))
+                .child(SharedString::from("AGENTS")),
         );
 
         // 动作按钮:图标 + 名字(Claude / Codex)。无彩 —— 深灰底 + 细描边 +
