@@ -644,6 +644,7 @@ impl WorkspaceView {
         };
         div()
             .h(gpui::px(24.0))
+            .flex_none() // 固定高度,不被压缩
             .flex()
             .flex_row()
             .items_center()
@@ -652,7 +653,15 @@ impl WorkspaceView {
             .border_t_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(color))
-            .child(text)
+            .overflow_hidden()
+            // 单行 + 超长截断省略号,绝不换行(否则挤出固定高度看不到)。
+            .child(
+                div()
+                    .w_full()
+                    .whitespace_nowrap()
+                    .truncate()
+                    .child(text),
+            )
     }
 }
 
