@@ -20,5 +20,4 @@ log.workspace = true
 # U8-spike:GPUI(pre-1.0)。先用 crates.io 版 pin 到 0.2.2 求可复现;
 # 若 API 缺失再改 git 依赖 zed 仓库。
 gpui = "0.2.2"
-# 判断字符显示宽度(1 或 2)——中日韩等宽字符占 2 列。wezterm 生态同款。
-unicode-width = "0.2"
+env_logger = "0.11"
