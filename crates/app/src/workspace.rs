@@ -27,12 +27,17 @@ struct Status {
     is_error: bool,
 }
 
-/// 规范化后比较两个路径(macOS /private 前缀、绝对/相对差异都能对上)。
+/// 规范化路径(消除 macOS /private 前缀、绝对/相对差异)。失败(如路径已删)
+/// 时回退原值。所有用作 terminals map key / active 比较的路径都必须先过它,
+/// 否则"点击时的路径"与"存入时的路径"字符串不等 → 同一 worktree 被当成两个
+/// (表现为:不高亮当前项、点当前项又起新会话顶掉正在跑的)。
+fn canon(p: &std::path::Path) -> std::path::PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// 规范化后比较两个路径。
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => a == b,
-    }
+    canon(a) == canon(b)
 }
 
 /// 数某 worktree 的未提交改动条数(git status --porcelain 行数)。
@@ -112,6 +117,8 @@ impl WorkspaceView {
 
     /// 打开一个 worktree:已有终端则切过去;没有则在该目录起一个默认 shell。
     fn open_worktree(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
+        // 统一用规范化路径作 key —— 避免同一 worktree 因 /private 前缀被当两个。
+        let wt_path = canon(&wt_path);
         if !self.terminals.contains_key(&wt_path) {
             // 没有活动终端(存量 worktree)→ 起一个默认 shell 会话。
             let wt_env = HookContext {
@@ -226,8 +233,10 @@ impl WorkspaceView {
             TerminalView::new(cx, Some(cwd), command, env)
                 .expect("failed to start agent terminal")
         });
-        self.terminals.insert(wt_path.clone(), terminal);
-        self.active = Some(wt_path.clone());
+        // 统一用规范化路径作 key(与 open_worktree / is_active 一致)。
+        let wt_key = canon(&wt_path);
+        self.terminals.insert(wt_key.clone(), terminal);
+        self.active = Some(wt_key);
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
         let _ = git::lock(&self.repo, &wt_path, Some("agent running"));
@@ -253,8 +262,8 @@ impl WorkspaceView {
 
     /// 请求关闭:先停 agent + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
-        // 先停掉该终端的 agent(两段式)。
-        if let Some(term) = self.terminals.get(&wt_path) {
+        // 先停掉该终端的 agent(两段式)。用规范化 key 查。
+        if let Some(term) = self.terminals.get(&canon(&wt_path)) {
             term.update(cx, |t, _| t.shutdown());
         }
 
@@ -319,11 +328,12 @@ impl WorkspaceView {
             return;
         }
 
-        // 4) 移除记录 + 终端 + active。
+        // 4) 移除记录 + 终端 + active(用规范化 key)。
         self.registry.unregister(&self.repo, &wt_path);
         self.persist_registry();
-        self.terminals.remove(&wt_path);
-        if self.active.as_deref() == Some(wt_path.as_path()) {
+        let key = canon(&wt_path);
+        self.terminals.remove(&key);
+        if self.active.as_deref().is_some_and(|a| same_path(a, &wt_path)) {
             self.active = self.terminals.keys().next().cloned();
         }
 
@@ -396,7 +406,10 @@ impl WorkspaceView {
                 .unwrap_or_else(|| "detached".to_string());
             let ours = self.is_ours(&wt.path);
             let is_main = self.is_main_repo(&wt.path);
-            let is_active = self.active.as_deref() == Some(wt.path.as_path());
+            let is_active = self
+                .active
+                .as_deref()
+                .is_some_and(|a| same_path(a, &wt.path));
             // ● = 本工具建的;· = 其它(主仓/手建)。仅视觉标记,不决定能否操作。
             let marker = if is_main {
                 "◆" // 主仓用菱形区分
