@@ -128,6 +128,30 @@ pub fn uses_submodules(repo: impl AsRef<Path>) -> bool {
     repo.as_ref().join(".gitmodules").is_file()
 }
 
+/// 某本地分支是否已存在(含被 worktree 删除后残留的孤儿分支)。
+pub fn branch_exists(repo: impl AsRef<Path>, branch: &str) -> bool {
+    // `git branch --list <name>` 存在则输出该分支行,否则空。
+    run_git(repo.as_ref(), &["branch", "--list", branch])
+        .map(|out| !out.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 从 `prefix` + 递增序号里找第一个**尚未被占用**的分支名。
+///
+/// 避重依据:分支已存在(`branch_exists`)。因为关闭 worktree 不删分支,
+/// 序号不能靠会归零的内存计数,必须真查 git —— 否则重启后会撞名。
+pub fn next_available_branch(repo: impl AsRef<Path>, prefix: &str) -> String {
+    let repo = repo.as_ref();
+    let mut n = 1;
+    loop {
+        let candidate = format!("{prefix}{n}");
+        if !branch_exists(repo, &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// 便捷:清理已被手动删除但元数据残留的 worktree 记录。
 pub fn prune(repo: impl AsRef<Path>) -> Result<(), GitError> {
     run_git(repo.as_ref(), &["worktree", "prune"])?;

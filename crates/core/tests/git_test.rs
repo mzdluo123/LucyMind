@@ -187,6 +187,33 @@ fn lock_unlock_roundtrip() {
 }
 
 #[test]
+fn next_available_branch_skips_existing() {
+    let (_dir, repo) = init_repo();
+    // 先占用 session-1、session-2(模拟关闭 worktree 后残留的孤儿分支)。
+    run(&repo, &["branch", "lucy/session-1"]);
+    run(&repo, &["branch", "lucy/session-2"]);
+
+    // 应跳过已占用,给出 session-3。
+    let next = git::next_available_branch(&repo, "lucy/session-");
+    assert_eq!(next, "lucy/session-3");
+}
+
+#[test]
+fn next_available_branch_from_empty() {
+    let (_dir, repo) = init_repo();
+    let next = git::next_available_branch(&repo, "lucy/session-");
+    assert_eq!(next, "lucy/session-1");
+}
+
+#[test]
+fn branch_exists_detects() {
+    let (_dir, repo) = init_repo();
+    run(&repo, &["branch", "feature/x"]);
+    assert!(git::branch_exists(&repo, "feature/x"));
+    assert!(!git::branch_exists(&repo, "nonexistent"));
+}
+
+#[test]
 fn list_reflects_multiple_worktrees() {
     let (dir, repo) = init_repo();
     for (i, br) in ["a", "b"].iter().enumerate() {

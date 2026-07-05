@@ -74,8 +74,6 @@ pub struct WorkspaceView {
     status: Option<Status>,
     /// 待确认的关闭(有未提交改动时弹窗)。
     pending_close: Option<PendingClose>,
-    /// 自增计数,给一键新建的分支起唯一名。
-    counter: usize,
     focus: FocusHandle,
 }
 
@@ -98,7 +96,6 @@ impl WorkspaceView {
             active: None,
             status: None,
             pending_close: None,
-            counter: 0,
             focus: cx.focus_handle(),
         }
     }
@@ -163,8 +160,9 @@ impl WorkspaceView {
 
     /// 主流程:建 worktree → postCreate hook → 起 agent 到终端。
     fn new_worktree_and_agent(&mut self, agent_name: &str, cx: &mut Context<Self>) {
-        self.counter += 1;
-        let branch = format!("lucy/session-{}", self.counter);
+        // 分支名避重:真查 git 找第一个空号(关闭不删分支,不能靠会归零的
+        // 内存计数,否则重启/清理后会撞名 —— 这正是 "branch already exists" 的根因)。
+        let branch = git::next_available_branch(&self.repo, "lucy/session-");
         let base = self.config.worktree.default_base.clone();
 
         // worktree 路径:仓库外兄弟目录(按配置)。
