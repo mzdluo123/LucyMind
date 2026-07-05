@@ -9,7 +9,9 @@ mod terminal_view;
 mod theme;
 mod workspace;
 
-use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{
+    prelude::*, px, size, App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
+};
 
 use assets::Assets;
 use workspace::WorkspaceView;
@@ -31,6 +33,14 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // 标准 macOS 标题栏 + 红绿灯(标题显示 LucyMind)。全屏时 macOS
+                // 会自动隐藏标题栏、鼠标移到顶部才浮现 —— 这是系统标准行为。
+                titlebar: Some(TitlebarOptions {
+                    title: Some("LucyMind".into()),
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                app_id: Some("win.rainchan.lucymind".into()),
                 ..Default::default()
             },
             move |_window, cx| cx.new(|cx| WorkspaceView::new(cx, repo.clone())),
