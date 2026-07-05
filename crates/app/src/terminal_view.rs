@@ -123,6 +123,11 @@ impl TerminalView {
         })
     }
 
+    /// 停掉本终端的 agent/shell 子进程(两段式)。关闭 worktree 前调用。
+    pub fn shutdown(&mut self) {
+        self.session.shutdown();
+    }
+
     // ---------------- 键盘 ----------------
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {

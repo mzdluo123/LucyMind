@@ -111,6 +111,37 @@ fn resize_does_not_panic() {
 }
 
 #[test]
+fn shutdown_kills_running_child() {
+    // 起一个长命令,shutdown 后应触发 ChildExit(进程被杀)。
+    let mut session = TerminalSession::spawn(
+        dims(),
+        None,
+        Some(("/bin/sh".into(), vec!["-c".into(), "sleep 100".into()])),
+        vec![],
+    )
+    .expect("spawn");
+    std::thread::sleep(Duration::from_millis(150));
+
+    session.shutdown();
+
+    // shutdown 后应在合理时间内收到 ChildExit。
+    let start = Instant::now();
+    let mut exited = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        for ev in session.drain_events() {
+            if let lucy_terminal::TermEvent::ChildExit(_) = ev {
+                exited = true;
+            }
+        }
+        if exited {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(exited, "shutdown 应停掉子进程并上报 ChildExit");
+}
+
+#[test]
 fn child_exit_is_reported() {
     let mut session = TerminalSession::spawn(
         dims(),

@@ -121,6 +121,8 @@ pub struct TerminalSession {
     events_rx: Receiver<ProxyEvent>,
     dimensions: TermDimensions,
     child_exited: Option<i32>,
+    /// agent/shell 子进程 PID(spawn 前捕获),用于两段式优雅停止。
+    child_pid: i32,
 }
 
 impl TerminalSession {
@@ -153,6 +155,9 @@ impl TerminalSession {
         };
         let pty = tty::new(&pty_options, dimensions.window_size(), 0)?;
 
+        // spawn 前捕获子进程 PID —— spawn 后 pty 移进后台线程,拿不到了。
+        let child_pid = pty.child().id() as i32;
+
         // 3) EventLoop:后台线程自动读 PTY → 解析进 Term → 发 Wakeup。
         let event_loop = EventLoop::new(
             Arc::clone(&term),
@@ -170,7 +175,38 @@ impl TerminalSession {
             events_rx,
             dimensions,
             child_exited: None,
+            child_pid,
         })
+    }
+
+    /// 两段式优雅停止 agent/shell 子进程:SIGHUP → 等 ~200ms → SIGKILL。
+    /// 参考 Conductor 的做法,给交互式 CLI 机会做优雅退出。
+    ///
+    /// 关闭 worktree 前调用。之后会发 Msg::Shutdown 让 EventLoop 收尾。
+    pub fn shutdown(&mut self) {
+        // 已退出则无需再杀。
+        if self.child_exited.is_some() {
+            let _ = self.loop_tx.send(Msg::Shutdown);
+            return;
+        }
+        let pid = self.child_pid;
+        if pid > 0 {
+            // 阶段一:SIGHUP(优雅)。
+            unsafe {
+                libc::kill(pid, libc::SIGHUP);
+            }
+            // 给它一点时间优雅退出。
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // 阶段二:若还活着,SIGKILL。kill(pid, 0) 探测存活。
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if alive {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+        // 通知 EventLoop 后台线程关闭。
+        let _ = self.loop_tx.send(Msg::Shutdown);
     }
 
     /// 锁定 Term 读取一份可渲染快照(cell 网格,含宽字符标志、颜色解析后)。
