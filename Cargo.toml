@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/terminal",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/myot/LucyMind"
+
+# 稳定依赖集中管理。GPUI 与 wezterm-term(两个 pre-1.0 git 依赖)
+# 刻意不在此声明,分别由 app / terminal crate 在各自引入,把不稳定性圈进隔离层。
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+portable-pty = "0.9"
+log = "0.4"
+
+# workspace 内部 crate
+lucy-core = { path = "crates/core" }
+lucy-terminal = { path = "crates/terminal" }

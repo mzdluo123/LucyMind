@@ -1,0 +1,17 @@
+[package]
+name = "lucy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# core 是纯逻辑层:worktree 编排、配置解析、hook 引擎、agent 规格。
+# 刻意不依赖 GPUI 与 wezterm-term —— 保持可移植、可单测。
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

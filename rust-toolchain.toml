@@ -1,0 +1,5 @@
+# GPUI 要求 latest stable Rust。这里 pin channel 而非具体版本,
+# 让 rustup 始终取最新 stable(GPUI 的 pre-1.0 API 常依赖新版编译器)。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

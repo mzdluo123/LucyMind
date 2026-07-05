@@ -1,0 +1,15 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# 本工具的本地覆盖配置层(U11 预留;个人定制不入仓)
+.worktree.local.toml
+
+# macOS
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

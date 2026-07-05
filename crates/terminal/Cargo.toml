@@ -1,0 +1,20 @@
+[package]
+name = "lucy-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 终端内核适配层:隔离 wezterm-term + portable-pty,不依赖 GPUI。
+# 注意:wezterm-term(git 依赖,pin rev)刻意留到 U6 引入 —— 它会拉整个
+# wezterm monorepo、首次编译很慢,不该拖累 U1 脚手架的构建。
+[dependencies]
+lucy-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+portable-pty.workspace = true
+
+# U6 将引入(git 依赖,pin rev):
+# wezterm-term = { git = "https://github.com/wezterm/wezterm", rev = "<pin>" }
+# termwiz = "0.23"
+# wezterm-input-types = "0.1"
