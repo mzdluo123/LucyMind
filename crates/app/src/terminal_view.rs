@@ -137,12 +137,12 @@ impl TerminalView {
         }
 
         let ks = &event.keystroke;
+
         // Cmd+C / Cmd+V(macOS)或 Ctrl+Shift+C/V(其他平台习惯)→ 复制/粘贴。
         let copy_combo = (ks.modifiers.platform && ks.key == "c")
             || (ks.modifiers.control && ks.modifiers.shift && ks.key == "c");
         let paste_combo = (ks.modifiers.platform && ks.key == "v")
             || (ks.modifiers.control && ks.modifiers.shift && ks.key == "v");
-
         if copy_combo {
             self.copy_selection(cx);
             return;
@@ -150,6 +150,27 @@ impl TerminalView {
         if paste_combo {
             self.paste_clipboard(cx);
             return;
+        }
+
+        // 这些控制键即便带 key_char 也必须由 on_key 编码(IME 不送控制码)。
+        let is_control_key = matches!(
+            ks.key.as_str(),
+            "enter" | "return" | "tab" | "escape" | "backspace" | "delete"
+                | "up" | "down" | "left" | "right" | "home" | "end"
+                | "pageup" | "pagedown"
+        );
+
+        // 关键:可打印字符(key_char 有值、无 ctrl/alt/cmd、且不是控制键)由
+        // EntityInputHandler 的 replace_text_in_range 负责送 PTY —— 这里**不能**
+        // 再送,否则每个字符被送两次(on_key_down + IME commit),表现为"输入一个
+        // 出来两个"。on_key 只处理 InputHandler 不碰的:功能键/方向键/Ctrl 组合/Enter。
+        let is_printable = !is_control_key
+            && ks.key_char.as_deref().is_some_and(|s| !s.is_empty())
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform;
+        if is_printable {
+            return; // 交给 IME commit 路径
         }
 
         if let Some(bytes) = keystroke_to_bytes(ks) {
