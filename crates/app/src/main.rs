@@ -7,6 +7,7 @@
 mod assets;
 mod terminal_view;
 mod theme;
+mod ui;
 mod workspace;
 
 use gpui::{
@@ -30,33 +31,35 @@ fn main() {
     let candidate = std::env::current_dir().ok();
 
     // with_assets:注册内嵌 SVG 图标源,svg().path("icons/...") 才能加载。
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        // 初始化 gpui-component(其 Input 等组件依赖 theme/global 状态)。
-        gpui_component::init(cx);
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            // 初始化 gpui-component(其 Input 等组件依赖 theme/global 状态)。
+            gpui_component::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(1100.), px(680.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // 标准 macOS 标题栏 + 红绿灯(标题显示 LucyMind)。全屏时 macOS
-                // 会自动隐藏标题栏、鼠标移到顶部才浮现 —— 这是系统标准行为。
-                titlebar: Some(TitlebarOptions {
-                    title: Some("LucyMind".into()),
-                    appears_transparent: false,
-                    traffic_light_position: None,
-                }),
-                app_id: Some("win.rainchan.lucymind".into()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                // 把根视图包进 gpui-component 的 Root —— 它的 Input/弹层/焦点管理
-                // 依赖 Root 提供的全局上下文,否则渲染/聚焦 Input 会 panic。
-                let workspace = cx.new(|cx| WorkspaceView::new(cx, candidate.clone()));
-                let view: gpui::AnyView = workspace.into();
-                cx.new(|cx| gpui_component::Root::new(view, window, cx))
-            },
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+            let bounds = Bounds::centered(None, size(px(1100.), px(680.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // 标准 macOS 标题栏 + 红绿灯(标题显示 LucyMind)。全屏时 macOS
+                    // 会自动隐藏标题栏、鼠标移到顶部才浮现 —— 这是系统标准行为。
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("LucyMind".into()),
+                        appears_transparent: false,
+                        traffic_light_position: None,
+                    }),
+                    app_id: Some("win.rainchan.lucymind".into()),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    // 把根视图包进 gpui-component 的 Root —— 它的 Input/弹层/焦点管理
+                    // 依赖 Root 提供的全局上下文,否则渲染/聚焦 Input 会 panic。
+                    let workspace = cx.new(|cx| WorkspaceView::new(cx, candidate.clone()));
+                    let view: gpui::AnyView = workspace.into();
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }
