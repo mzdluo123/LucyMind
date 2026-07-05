@@ -26,6 +26,9 @@ pub enum Key {
     Left,
     Home,
     End,
+    PageUp,
+    PageDown,
+    Delete,
 }
 
 /// 把一个按键编码成要写入 PTY 的字节。U7 会扩展(功能键、光标应用模式等)。
@@ -48,6 +51,9 @@ pub fn encode(key: &Key, mods: Mods) -> Vec<u8> {
         Key::Left => csi_or_ss3(b'D'),
         Key::Home => b"\x1b[H".to_vec(),
         Key::End => b"\x1b[F".to_vec(),
+        Key::PageUp => b"\x1b[5~".to_vec(),
+        Key::PageDown => b"\x1b[6~".to_vec(),
+        Key::Delete => b"\x1b[3~".to_vec(),
     }
 }
 

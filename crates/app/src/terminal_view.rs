@@ -889,6 +889,9 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
         "left" => Key::Left,
         "home" => Key::Home,
         "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "delete" => Key::Delete,
         "space" => Key::Char(' '),
         other => {
             if let Some(im) = &ks.key_char {
