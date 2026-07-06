@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use gpui::TestAppContext;
 
-use common::{build_workspace, shutdown_workspace, temp_repo, temp_repo_with_agent, wait_for};
+use common::{
+    build_workspace, shutdown_workspace, temp_repo, temp_repo_with_agent, wait_for,
+    wait_for_shell_ready,
+};
 use lucy_app::workspace::ShellKind;
 
 mod common;
@@ -388,6 +391,9 @@ async fn terminal_title_updates_from_osc(cx: &mut TestAppContext) {
 
     let wt_path = create_worktree(cx, &workspace);
 
+    // 等 shell 就绪后再发 OSC 序列(避免命令在 shell 启动前被缓冲,CI 慢机器上更可靠)。
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
+
     // 给 shell 发 OSC 0/2 标题序列。
     // Windows 默认 shell 是 PowerShell,echo 不输出原始字节;用 [Console]::Write
     // 直接写 stdout。Unix 用 printf 输出转义序列。
@@ -464,8 +470,8 @@ async fn send_agent_command_writes_to_shell(cx: &mut TestAppContext) {
 
     let wt_path = create_worktree(cx, &workspace);
 
-    // 等 shell 就绪(PTY spawn 有延迟)。
-    std::thread::sleep(Duration::from_millis(500));
+    // 等 shell 就绪(PTY spawn 有延迟,CI 机器负载高时可能 >500ms)。
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
 
     // 发 agent 命令到 shell。
     cx.update(|cx| {
@@ -1039,7 +1045,8 @@ async fn shell_kind_default_spawns_shell(cx: &mut TestAppContext) {
 
     let wt_path = create_worktree(cx, &workspace);
 
-    std::thread::sleep(Duration::from_millis(500));
+    // 等 shell 就绪后再发命令(CI 机器负载高时 shell spawn 可能 >500ms)。
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
 
     let term = cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()));
     if let Some(term) = term {
@@ -1154,7 +1161,8 @@ async fn launch_agent_sends_command_to_new_tab(cx: &mut TestAppContext) {
 
     let wt_path = create_worktree(cx, &workspace);
 
-    std::thread::sleep(Duration::from_millis(500));
+    // 等 shell 就绪后再发 agent 命令(CI 机器负载高时 shell spawn 可能 >500ms)。
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
 
     cx.update(|cx| {
         workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));

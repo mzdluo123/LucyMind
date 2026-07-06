@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use gpui::TestAppContext;
 
-use common::{build_workspace, shutdown_workspace, temp_repo_with_agent, wait_for};
+use common::{
+    build_workspace, shutdown_workspace, temp_repo_with_agent, wait_for, wait_for_shell_ready,
+};
 
 mod common;
 
@@ -33,16 +35,19 @@ async fn pty_output_appears_in_snapshot(cx: &mut TestAppContext) {
         workspace.update(cx, |v, cx| v.new_worktree_for_test(cx));
     });
 
-    // 等 shell 就绪(PTY spawn 有延迟,先等终端存在)。
+    // 等 worktree 创建完成(active_path 就绪)。
     wait_for(
         cx,
         |cx| cx.update(|cx| workspace.update(cx, |v, _| v.active_path().is_some())),
         Duration::from_secs(15),
     );
+    let wt_path = cx.update(|cx| {
+        workspace.update(cx, |v, _| v.active_path().map(|p| p.to_path_buf()).unwrap())
+    });
 
-    // 给 shell 进程时间启动并准备好接收输入(PTY 缓冲了输入,但 shell
-    // 需要时间 spawn + 初始化)。
-    std::thread::sleep(Duration::from_millis(500));
+    // 等 shell 就绪(PTY spawn 有延迟,CI 机器负载高时可能 >500ms)。
+    // 轮询 snapshot 非空(shell 打印提示符)确保 PTY reader 已工作 + shell 可接收命令。
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
 
     // 通过 send_agent_command 往 shell 发 "test" agent 命令。
     // test agent 配置为 echo/printf RENDER_MARKER,命令执行后输出出现在 snapshot。

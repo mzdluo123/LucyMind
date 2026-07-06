@@ -121,6 +121,30 @@ where
     }
 }
 
+/// 等待 shell 产出任何输出(提示符),确保 shell 已就绪可接收命令。
+///
+/// 比 fixed sleep 更可靠:CI 机器负载高时 shell spawn + 首次输出可能 >500ms。
+/// 固定 sleep 在慢机器上不够,在快机器上浪费时间。轮询 snapshot 非空
+/// (shell 启动后会打印提示符)确保 PTY reader 线程已在工作、shell 已就绪。
+pub fn wait_for_shell_ready(
+    cx: &mut TestAppContext,
+    workspace: &Entity<WorkspaceView>,
+    wt_path: &std::path::Path,
+    timeout: Duration,
+) {
+    wait_for(
+        cx,
+        |cx| {
+            let term = cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(wt_path).cloned()));
+            term.is_some_and(|t| {
+                cx.update(|cx| t.update(cx, |tv, _| tv.poll_events_for_test()));
+                !cx.read(|cx| t.read(cx).snapshot_text().trim().is_empty())
+            })
+        },
+        timeout,
+    );
+}
+
 /// 停掉 workspace 内所有终端 + 排空异步,避免 `leak-detection` 误报。
 ///
 /// TerminalView 的 `cx.spawn` 轮询循环是长任务,不显式 shutdown 会在测试结束

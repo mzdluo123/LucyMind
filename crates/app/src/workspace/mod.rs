@@ -120,15 +120,15 @@ impl ShellKind {
     /// 转成 `TerminalView::new` 的 `command` 参数。
     /// `None` = 系统默认 shell;`Some((program, args))` = 指定程序。
     /// `is_remote` = true 时,Windows 专属 shell(Cmd/PowerShell/Pwsh)不可用,返回 None。
-    fn command(&self, is_remote: bool) -> Option<(String, Vec<String>)> {
+    fn command(&self, _is_remote: bool) -> Option<(String, Vec<String>)> {
         match self {
             ShellKind::Default => None,
             #[cfg(windows)]
-            ShellKind::Cmd if !is_remote => Some(("cmd.exe".into(), vec![])),
+            ShellKind::Cmd if !_is_remote => Some(("cmd.exe".into(), vec![])),
             #[cfg(windows)]
-            ShellKind::PowerShell if !is_remote => Some(("powershell.exe".into(), vec![])),
+            ShellKind::PowerShell if !_is_remote => Some(("powershell.exe".into(), vec![])),
             #[cfg(windows)]
-            ShellKind::Pwsh if !is_remote => Some(("pwsh.exe".into(), vec![])),
+            ShellKind::Pwsh if !_is_remote => Some(("pwsh.exe".into(), vec![])),
             // 远程模式或非 Windows:Windows 专属 shell 不可用。
             #[cfg(windows)]
             ShellKind::Cmd | ShellKind::PowerShell | ShellKind::Pwsh => None,
