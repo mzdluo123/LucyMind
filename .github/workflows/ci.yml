@@ -1,0 +1,69 @@
+# CI: build + test + clippy on macOS / Windows / Ubuntu.
+#
+# GPUI 0.2.2 (crates.io) 支持 macOS(Metal)、Windows(D3D)、Linux(X11/Wayland)。
+# app 层 #[gpui::test] 用 TestPlatform(headless,无需真实 GPU/窗口),三平台均可跑。
+#
+# terminal 层测试起真实 PTY 子进程(Unix /bin/sh,Windows cmd.exe),已跨平台适配。
+# core 层 hooks_test 用平台对应 shell 语法(sh /cmd.exe)。
+#
+# Linux 需装 X11/Wayland 系统依赖(GPUI 编译期依赖,即使 test-support 也需)。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS = Metal,Windows = D3D+Windows.UI,Ubuntu = X11/Wayland。
+        # GPUI 0.2.2 三平台都支持编译;test-support 用 headless TestPlatform。
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # GPUI 0.2.2 编译期依赖(X11/Wayland/字体/音频等)。test-support 也需这些。
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxext-dev libxft-dev libwayland-dev libxkbcommon-dev \
+            libdbus-1-dev libfontconfig-dev libfreetype6-dev \
+            libgbm-dev libegl-dev libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+        timeout-minutes: 15
+
+      - name: Build release binary
+        run: cargo build --release -p lucy-app
+        timeout-minutes: 20

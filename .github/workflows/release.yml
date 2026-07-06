@@ -1,0 +1,98 @@
+# Release: 构建 macOS / Windows release 产物,打 tag 时自动发布 GitHub Release。
+#
+# 产物:
+# - macOS: cargo build --release → LucyMind.app(cargo-bundle 补 Info.plist)
+# - Windows: cargo build --release → lucy.exe(压缩成 zip)
+#
+# 触发:推送 v* tag(如 v0.1.0)。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-macos:
+    name: Release (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p lucy-app
+        timeout-minutes: 30
+
+      - name: Bundle .app
+        run: cargo bundle --release -p lucy-app
+        timeout-minutes: 10
+
+      - name: Create dmg archive
+        run: |
+          cd target/release
+          # 把 LucyMind.app 打成 zip(GitHub Release 不支持 dmg 上传的权限问题)。
+          ditto -c -k --keepParent LucyMind.app LucyMind-macos.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LucyMind-macos
+          path: target/release/LucyMind-macos.zip
+
+  release-windows:
+    name: Release (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p lucy-app
+        timeout-minutes: 30
+
+      - name: Create zip archive
+        run: |
+          cd target/release
+          7z a LucyMind-windows.zip lucy.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LucyMind-windows
+          path: target/release/LucyMind-windows.zip
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [release-macos, release-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/LucyMind-macos/LucyMind-macos.zip
+            artifacts/LucyMind-windows/LucyMind-windows.zip
