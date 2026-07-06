@@ -58,7 +58,9 @@ fn creates_worktree_on_new_branch() {
     assert!(wt.join("README.md").is_file(), "worktree checked out files");
 
     let list = git::list(&repo).expect("list");
-    assert!(list.iter().any(|e| e.branch.as_deref() == Some("feature/x")));
+    assert!(list
+        .iter()
+        .any(|e| e.branch.as_deref() == Some("feature/x")));
 }
 
 #[test]
@@ -88,7 +90,9 @@ fn creates_detached_worktree() {
 
     let list = git::list(&repo).expect("list");
     // detached 条目 branch 为 None。
-    assert!(list.iter().any(|e| same_path(&e.path, &wt) && e.branch.is_none()));
+    assert!(list
+        .iter()
+        .any(|e| same_path(&e.path, &wt) && e.branch.is_none()));
 }
 
 #[test]

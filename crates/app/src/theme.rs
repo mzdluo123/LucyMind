@@ -47,7 +47,7 @@ pub const TEXT: u32 = 0xc8_c8_ce;
 /// 次要文字 / 标签。
 pub const TEXT_DIM: u32 = 0x8a_8a_92;
 /// 最弱文字(占位、辅助)。
-pub const TEXT_FAINT: u32 = 0x5c_5c_64;
+pub const TEXT_FAINT: u32 = 0x5c5c64;
 
 /// 冷白高亮(极克制地用于当前项 / 强调文字)。
 pub const TEXT_BRIGHT: u32 = 0xe8_e8_ee;

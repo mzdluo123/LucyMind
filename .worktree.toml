@@ -24,12 +24,23 @@ fail_fast = true
 
 [agents.claude]
 command = "claude"
+# config 预设完全覆盖 builtin args,故须显式带上 bypass 参数
+# (builtin 默认 --dangerously-skip-permissions;不写则丢失)。
+args = ["--dangerously-skip-permissions"]
 
 [agents.codex]
 command = "codex"
+# --dangerously-bypass-approvals-and-sandbox:worktree 已是隔离边界,codex 自带沙箱多余。
+args = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[agents.opencode]
+command = "opencode"
+# --auto:自动批准非显式 deny 的权限项。
+args = ["--auto"]
 
 [alias]
 "lucy/session-40" = "hello-world"
 "lucy/session-43" = "好孩子"
 "lucy/session-44" = "1"
 "lucy/session-45" = "1"
+"lucy/merry-sage-wolf-grove" = "test"

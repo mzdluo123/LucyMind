@@ -25,7 +25,11 @@ pub enum CreateMode {
 ///
 /// - `NewBranch` / `ExistingBranch`:创建前检查目标分支是否已被其它 worktree 检出,
 ///   命中则返回 [`GitError::BranchInUse`]。
-pub fn add(repo: impl AsRef<Path>, path: impl AsRef<Path>, mode: &CreateMode) -> Result<(), GitError> {
+pub fn add(
+    repo: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+    mode: &CreateMode,
+) -> Result<(), GitError> {
     let repo = repo.as_ref();
     let path = path.as_ref();
 
@@ -199,12 +203,12 @@ const COLORS: &[&str] = &[
     "olive", "pearl", "ruby", "sage", "teal", "violet", "ivory", "onyx", "slate", "rose",
 ];
 const ANIMALS: &[&str] = &[
-    "fox", "owl", "wolf", "hawk", "lynx", "otter", "seal", "crane", "raven", "moth",
-    "koi", "elk", "bear", "swan", "wren", "ibis", "puma", "orca", "toad", "yak",
+    "fox", "owl", "wolf", "hawk", "lynx", "otter", "seal", "crane", "raven", "moth", "koi", "elk",
+    "bear", "swan", "wren", "ibis", "puma", "orca", "toad", "yak",
 ];
 const NATURE: &[&str] = &[
-    "moon", "reef", "dune", "peak", "grove", "creek", "cliff", "tide", "mist", "spark",
-    "ember", "frost", "storm", "vale", "fjord", "atoll", "delta", "ridge", "bloom", "leaf",
+    "moon", "reef", "dune", "peak", "grove", "creek", "cliff", "tide", "mist", "spark", "ember",
+    "frost", "storm", "vale", "fjord", "atoll", "delta", "ridge", "bloom", "leaf",
 ];
 
 /// 便捷:清理已被手动删除但元数据残留的 worktree 记录。

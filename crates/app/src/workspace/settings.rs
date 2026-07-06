@@ -188,7 +188,11 @@ impl WorkspaceView {
                     theme::BORDER
                 }))
                 .rounded(theme::radius())
-                .text_color(rgb(if selected { theme::TEXT_BRIGHT } else { theme::TEXT }))
+                .text_color(rgb(if selected {
+                    theme::TEXT_BRIGHT
+                } else {
+                    theme::TEXT
+                }))
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
                 .child(SharedString::from(label.to_string()))

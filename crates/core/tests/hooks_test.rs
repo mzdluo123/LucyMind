@@ -49,7 +49,10 @@ fn runs_commands_in_order() {
 fn injects_worktree_env_vars() {
     let (_dir, c) = ctx();
     // 把环境变量写进文件,再读回断言。
-    let hooks = hooks_with(vec!["echo \"$WORKTREE_BRANCH|$WORKTREE_NAME\" > env.txt"], true);
+    let hooks = hooks_with(
+        vec!["echo \"$WORKTREE_BRANCH|$WORKTREE_NAME\" > env.txt"],
+        true,
+    );
 
     hooks::run_event(LifecycleEvent::PostCreate, &hooks, &no_copy(), &c, |_| {});
     let content = std::fs::read_to_string(c.worktree_path.join("env.txt")).unwrap();
@@ -137,6 +140,8 @@ fn on_step_callback_fires_per_step() {
     let (_dir, c) = ctx();
     let hooks = hooks_with(vec!["true", "true"], true);
     let mut count = 0;
-    hooks::run_event(LifecycleEvent::PostCreate, &hooks, &no_copy(), &c, |_| count += 1);
+    hooks::run_event(LifecycleEvent::PostCreate, &hooks, &no_copy(), &c, |_| {
+        count += 1
+    });
     assert_eq!(count, 2);
 }

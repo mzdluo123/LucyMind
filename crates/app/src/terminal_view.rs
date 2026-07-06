@@ -17,8 +17,9 @@ use gpui::{
     div, fill, point, px, relative, rgb, size, App, AsyncApp, Bounds, ClipboardItem, Context,
     Element, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle, Focusable,
     GlobalElementId, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    ScrollDelta, ScrollWheelEvent, Style, Styled, TextRun, UnderlineStyle, WeakEntity, Window,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Style, Styled,
+    TextRun, UnderlineStyle, WeakEntity, Window,
 };
 
 use lucy_terminal::input::{self, Key, Mods};
@@ -63,6 +64,15 @@ pub struct TerminalView {
     last_bounds: Option<Bounds<Pixels>>,
     cell_w: Pixels,
     line_h: Pixels,
+
+    // ---- 复制视觉反馈 ----
+    /// 复制成功后的剩余闪烁时间(秒);Some = 正在闪烁,None = 无。
+    copy_flash: Option<f32>,
+
+    // ---- 右键上下文菜单 ----
+    context_menu_open: bool,
+    /// 菜单弹出位置(窗口坐标,渲染时转成相对偏移)。
+    context_menu_pos: Point<Pixels>,
 }
 
 impl TerminalView {
@@ -77,8 +87,8 @@ impl TerminalView {
         let snapshot = session.snapshot();
 
         // 后台轮询:每 ~16ms drain 事件 + 刷新快照 + notify 重绘。
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            loop {
+        cx.spawn(
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
@@ -97,6 +107,14 @@ impl TerminalView {
                                 }
                             }
                         }
+                        // 复制闪烁倒计时(~300ms)。
+                        if let Some(flash) = &mut view.copy_flash {
+                            *flash -= 0.016;
+                            if *flash <= 0.0 {
+                                view.copy_flash = None;
+                            }
+                            dirty = true;
+                        }
                         if dirty {
                             view.snapshot = view.session.snapshot();
                             cx.notify();
@@ -106,8 +124,8 @@ impl TerminalView {
                 if !alive {
                     break;
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         Ok(Self {
@@ -123,6 +141,9 @@ impl TerminalView {
             last_bounds: None,
             cell_w: px(9.0),
             line_h: px(LINE_HEIGHT),
+            copy_flash: None,
+            context_menu_open: false,
+            context_menu_pos: point(px(0.0), px(0.0)),
         })
     }
 
@@ -133,7 +154,13 @@ impl TerminalView {
 
     /// 若行列数变化则 resize PTY + Term(paint 时按 bounds 调用)。
     /// cell 像素尺寸一并传给内核用于向终端程序报告像素尺寸。
-    fn maybe_resize(&mut self, cols: usize, rows: usize, cell_w: gpui::Pixels, line_h: gpui::Pixels) {
+    fn maybe_resize(
+        &mut self,
+        cols: usize,
+        rows: usize,
+        cell_w: gpui::Pixels,
+        line_h: gpui::Pixels,
+    ) {
         if cols == 0 || rows == 0 {
             return;
         }
@@ -155,12 +182,39 @@ impl TerminalView {
     // ---------------- 键盘 ----------------
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+
+        // Esc 关闭上下文菜单(优先于 IME 判断)。
+        if self.context_menu_open && ks.key == "escape" {
+            self.context_menu_open = false;
+            cx.notify();
+            return;
+        }
+
         // IME 组合中的按键交给 InputHandler 处理,这里不重复送。
         if !self.ime_preedit.is_empty() {
             return;
         }
 
-        let ks = &event.keystroke;
+        // 全选:Cmd+A(macOS)或 Ctrl+Shift+A(其他平台)。
+        // Ctrl+A 无 Shift 不拦截——终端程序用 readline 行首。
+        let select_all_combo = (ks.modifiers.platform && ks.key == "a")
+            || (ks.modifiers.control && ks.modifiers.shift && ks.key == "a");
+        if select_all_combo {
+            let rows = self.snapshot.rows;
+            let cols = self.snapshot.cols;
+            if rows > 0 && cols > 0 {
+                self.selection = Some((
+                    CellPos { row: 0, col: 0 },
+                    CellPos {
+                        row: rows - 1,
+                        col: cols,
+                    },
+                ));
+                cx.notify();
+            }
+            return;
+        }
 
         // Cmd+C / Cmd+V(macOS)或 Ctrl+Shift+C/V(其他平台习惯)→ 复制/粘贴。
         let copy_combo = (ks.modifiers.platform && ks.key == "c")
@@ -179,9 +233,20 @@ impl TerminalView {
         // 这些控制键即便带 key_char 也必须由 on_key 编码(IME 不送控制码)。
         let is_control_key = matches!(
             ks.key.as_str(),
-            "enter" | "return" | "tab" | "escape" | "backspace" | "delete"
-                | "up" | "down" | "left" | "right" | "home" | "end"
-                | "pageup" | "pagedown"
+            "enter"
+                | "return"
+                | "tab"
+                | "escape"
+                | "backspace"
+                | "delete"
+                | "up"
+                | "down"
+                | "left"
+                | "right"
+                | "home"
+                | "end"
+                | "pageup"
+                | "pagedown"
         );
 
         // 关键:可打印字符(key_char 有值、无 ctrl/alt/cmd、且不是控制键)由
@@ -208,6 +273,9 @@ impl TerminalView {
         if let Some(text) = self.selected_text() {
             if !text.is_empty() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
+                // 复制视觉反馈:选区短暂闪烁。
+                self.copy_flash = Some(0.3);
+                cx.notify();
             }
         }
     }
@@ -221,6 +289,7 @@ impl TerminalView {
     }
 
     /// 从快照按选区抽出文本(按行拼接,规范化选区顺序)。
+    /// 每行尾随空格被 trim,消除「复制一行粘了 70 个空格」的问题。
     fn selected_text(&self) -> Option<String> {
         let (a, b) = self.selection?;
         let (start, end) = order(a, b);
@@ -229,17 +298,88 @@ impl TerminalView {
         for row in start.row..=end.row.min(snap.rows.saturating_sub(1)) {
             let col_start = if row == start.row { start.col } else { 0 };
             let col_end = if row == end.row { end.col } else { snap.cols };
+            let mut line = String::new();
             for col in col_start..col_end.min(snap.cols) {
                 let cell = snap.cell(row, col);
                 if cell.width != 0 {
-                    out.push(cell.ch);
+                    line.push(cell.ch);
                 }
             }
+            out.push_str(line.trim_end());
             if row != end.row {
                 out.push('\n');
             }
         }
         Some(out)
+    }
+
+    /// 词边界判定:非字母数字且非下划线 = 边界。
+    /// 用于双击选词:连续的字母数字/下划线构成一个「词」。
+    fn word_boundary(ch: char) -> bool {
+        !(ch.is_alphanumeric() || ch == '_')
+    }
+
+    /// 双击选词:从点击 cell 向左右扩展到词边界,返回选区。
+    /// 点击落在非词字符(空格/标点)上时返回 None。
+    fn select_word_at(&self, pos: CellPos) -> Option<(CellPos, CellPos)> {
+        let snap = &self.snapshot;
+        if pos.row >= snap.rows {
+            return None;
+        }
+        let cell = snap.cell(pos.row, pos.col);
+        if Self::word_boundary(cell.ch) {
+            return None;
+        }
+        // 向左扩展到第一个词字符。
+        let mut start_col = pos.col;
+        while start_col > 0 && !Self::word_boundary(snap.cell(pos.row, start_col - 1).ch) {
+            start_col -= 1;
+        }
+        // 向右扩展:end_col 是 exclusive(词后第一个边界位置)。
+        let mut end_col = pos.col + 1;
+        while end_col < snap.cols && !Self::word_boundary(snap.cell(pos.row, end_col).ch) {
+            end_col += 1;
+        }
+        Some((
+            CellPos {
+                row: pos.row,
+                col: start_col,
+            },
+            CellPos {
+                row: pos.row,
+                col: end_col,
+            },
+        ))
+    }
+
+    /// 三击选行:col 0 到最后一个非空格 cell,整行空白返回 None。
+    fn select_line_at(&self, pos: CellPos) -> Option<(CellPos, CellPos)> {
+        let snap = &self.snapshot;
+        if pos.row >= snap.rows {
+            return None;
+        }
+        // 从右往左找第一个有内容的 cell。
+        let mut end_col = snap.cols;
+        while end_col > 0 {
+            let cell = snap.cell(pos.row, end_col - 1);
+            if cell.width != 0 && cell.ch != ' ' {
+                break;
+            }
+            end_col -= 1;
+        }
+        if end_col == 0 {
+            return None;
+        }
+        Some((
+            CellPos {
+                row: pos.row,
+                col: 0,
+            },
+            CellPos {
+                row: pos.row,
+                col: end_col,
+            },
+        ))
     }
 
     // ---------------- 鼠标 ----------------
@@ -298,20 +438,72 @@ impl TerminalView {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        // 右键:打开上下文菜单。
+        if ev.button == MouseButton::Right {
+            self.context_menu_open = true;
+            self.context_menu_pos = ev.position;
+            cx.notify();
+            return;
+        }
+
         if ev.button != MouseButton::Left {
             return;
         }
+
+        // 菜单打开时,左键先关闭菜单(不触发选区/其他操作)。
+        if self.context_menu_open {
+            self.context_menu_open = false;
+            cx.notify();
+            return;
+        }
+
         // 滚动条区域:进入拖动模式,直接跳到点击位置。
         if self.in_scrollbar(ev.position) {
             self.dragging_scrollbar = true;
             self.scroll_to_mouse_y(ev.position, cx);
             return;
         }
-        if let Some(cell) = self.cell_at(ev.position) {
-            self.is_selecting = true;
-            self.selection = Some((cell, cell));
-            cx.notify();
+
+        let Some(cell) = self.cell_at(ev.position) else {
+            return;
+        };
+
+        match ev.click_count {
+            2 => {
+                // 双击选词:选中词并复制。不进入拖动模式。
+                if let Some(sel) = self.select_word_at(cell) {
+                    self.selection = Some(sel);
+                    self.copy_selection(cx);
+                }
+                // 双击落在非词字符上:不清除已有选区(避免误清)。
+            }
+            3 => {
+                // 三击选行:选中整行并复制。
+                if let Some(sel) = self.select_line_at(cell) {
+                    self.selection = Some(sel);
+                    self.copy_selection(cx);
+                }
+            }
+            _ => {
+                // 单击。
+                if ev.modifiers.shift {
+                    // Shift+点击:扩展选区(起点不变,终点移到点击位置)。
+                    if let Some((start, _)) = self.selection {
+                        self.selection = Some((start, cell));
+                        self.copy_selection(cx);
+                    } else {
+                        // 无选区:当作普通点击开始新选区。
+                        self.is_selecting = true;
+                        self.selection = Some((cell, cell));
+                    }
+                } else {
+                    // 普通点击:开始新选区。
+                    self.is_selecting = true;
+                    self.selection = Some((cell, cell));
+                }
+            }
         }
+        cx.notify();
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -329,21 +521,38 @@ impl TerminalView {
         }
     }
 
-    fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let was_selecting = self.is_selecting;
         self.is_selecting = false;
         self.dragging_scrollbar = false;
-        // 单击(起点==终点)视为清除选区。
-        if let Some((a, b)) = self.selection {
-            if a == b {
-                self.selection = None;
+
+        // copy-on-select:拖选释放时若选区非空,自动复制。
+        // IME 组合中不触发(避免干扰预编辑)。
+        if was_selecting && self.ime_preedit.is_empty() {
+            let sel = self.selection;
+            if let Some((a, b)) = sel {
+                if a != b {
+                    self.copy_selection(cx);
+                } else {
+                    // 单击(起点==终点):清除选区。
+                    self.selection = None;
+                    cx.notify();
+                }
             }
         }
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let lh = f32::from(self.line_h);
         let lines = match ev.delta {
             ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / LINE_HEIGHT,
+            ScrollDelta::Pixels(p) => {
+                if lh > 0.0 {
+                    f32::from(p.y) / lh
+                } else {
+                    f32::from(p.y) / LINE_HEIGHT
+                }
+            }
         };
         let n = lines as i32;
         if n == 0 {
@@ -354,11 +563,7 @@ impl TerminalView {
         if self.snapshot.alt_screen {
             // 备用屏(claude code/vim 等)无 scrollback —— 把滚轮转成方向键发给
             // 程序,让它自己滚(alternate-scroll 行为)。上滚=↑,下滚=↓。
-            let (key, count) = if n > 0 {
-                (Key::Up, n)
-            } else {
-                (Key::Down, -n)
-            };
+            let (key, count) = if n > 0 { (Key::Up, n) } else { (Key::Down, -n) };
             let mut bytes = Vec::new();
             for _ in 0..count.min(10) {
                 // 单次滚轮最多转发 10 次,避免猛滚刷太多
@@ -374,10 +579,142 @@ impl TerminalView {
         let _ = window;
     }
 
+    /// 右键上下文菜单(Copy / Paste / Select All)。半透明遮罩 + 定位卡片。
+    /// 无选区时 Copy 项灰显。点遮罩 / Esc / 选中项均关菜单。
+    fn context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_selection = self.selection.map(|(a, b)| a != b).unwrap_or(false);
+
+        // 菜单定位:把窗口坐标转成相对终端 div 的偏移。
+        let pad = theme::space_sm();
+        let (menu_x, menu_y) = match self.last_bounds {
+            Some(bounds) => (
+                self.context_menu_pos.x - bounds.origin.x + pad,
+                self.context_menu_pos.y - bounds.origin.y + pad,
+            ),
+            None => (px(0.0), px(0.0)),
+        };
+
+        // 遮罩:点左键关闭、点右键移动菜单位置。
+        let backdrop = div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    this.context_menu_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                    this.context_menu_pos = ev.position;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            );
+
+        // Copy 项:无选区时灰显、不可点。
+        let copy_item = if has_selection {
+            div()
+                .id("ctx-copy")
+                .px(theme::space_md())
+                .py(theme::space_xs())
+                .min_w(px(160.0))
+                .cursor_pointer()
+                .text_color(rgb(theme::TEXT))
+                .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+                .child(SharedString::from("Copy"))
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    this.copy_selection(cx);
+                    this.context_menu_open = false;
+                    cx.notify();
+                }))
+        } else {
+            div()
+                .id("ctx-copy-disabled")
+                .px(theme::space_md())
+                .py(theme::space_xs())
+                .min_w(px(160.0))
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(SharedString::from("Copy"))
+        };
+
+        // Paste 项。
+        let paste_item = div()
+            .id("ctx-paste")
+            .px(theme::space_md())
+            .py(theme::space_xs())
+            .cursor_pointer()
+            .text_color(rgb(theme::TEXT))
+            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .child(SharedString::from("Paste"))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.paste_clipboard(cx);
+                this.context_menu_open = false;
+                cx.notify();
+            }));
+
+        // Select All 项。
+        let select_all_item = div()
+            .id("ctx-select-all")
+            .px(theme::space_md())
+            .py(theme::space_xs())
+            .cursor_pointer()
+            .text_color(rgb(theme::TEXT))
+            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .child(SharedString::from("Select All"))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                let rows = this.snapshot.rows;
+                let cols = this.snapshot.cols;
+                if rows > 0 && cols > 0 {
+                    this.selection = Some((
+                        CellPos { row: 0, col: 0 },
+                        CellPos {
+                            row: rows - 1,
+                            col: cols,
+                        },
+                    ));
+                }
+                this.context_menu_open = false;
+                cx.notify();
+            }));
+
+        // 卡片:描边 + 2px 圆角(与 agent_menu overlay 同语言)。
+        // stop_propagation 让点卡片内(项间空白)不冒泡到遮罩关菜单。
+        let card = div()
+            .absolute()
+            .left(menu_x)
+            .top(menu_y)
+            .bg(rgb(theme::SURFACE))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .rounded(theme::radius())
+            .py(theme::space_xs())
+            .flex()
+            .flex_col()
+            .child(copy_item)
+            .child(paste_item)
+            .child(select_all_item)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                }),
+            );
+
+        backdrop.child(card)
+    }
+
     fn element(&self, cx: &Context<Self>) -> TerminalElement {
-        TerminalElement {
-            view: cx.entity(),
-        }
+        TerminalElement { view: cx.entity() }
     }
 }
 
@@ -389,21 +726,29 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let mut root = div()
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .size_full()
+            .relative()
             .bg(rgb(DEFAULT_BG))
             // 左右留白,让终端内容不贴边(element 的 bounds 会随 padding 内缩,
             // 行列计算/鼠标映射/绘制全部基于内缩后的 bounds,自洽无需改坐标)。
             .px(theme::space_sm())
-            .child(self.element(cx))
+            .child(self.element(cx));
+
+        if self.context_menu_open {
+            root = root.child(self.context_menu(cx));
+        }
+
+        root
     }
 }
 
@@ -489,9 +834,9 @@ impl EntityInputHandler for TerminalView {
         } else {
             // new_selected 是 UTF-16 相对新文本;转 UTF-8 存。
             match new_selected {
-                Some(sel) => Some(
-                    utf16_to_utf8(new_text, sel.start)..utf16_to_utf8(new_text, sel.end),
-                ),
+                Some(sel) => {
+                    Some(utf16_to_utf8(new_text, sel.start)..utf16_to_utf8(new_text, sel.end))
+                }
                 None => Some(0..new_text.len()),
             }
         };
@@ -594,13 +939,17 @@ impl Element for TerminalElement {
         );
 
         // 取快照 + 选区(clone 出来避免借用冲突)。
-        let (snap, selection, preedit) = {
+        let (snap, selection, preedit, copy_flash) = {
             let v = self.view.read(cx);
-            (v.snapshot.clone(), v.selection, v.ime_preedit.clone())
+            (
+                v.snapshot.clone(),
+                v.selection,
+                v.ime_preedit.clone(),
+                v.copy_flash.is_some(),
+            )
         };
 
         let font_size = px(FONT_SIZE);
-        let line_height = px(LINE_HEIGHT);
         let probe = window.text_system().shape_line(
             "0".into(),
             font_size,
@@ -611,6 +960,18 @@ impl Element for TerminalElement {
             probe.width
         } else {
             px(9.0)
+        };
+        // 行高取字体实际 ascent + descent,而非硬编码常量。
+        // 这样 box-drawing 字符(│╮╰╯─)恰好填满行高,垂直线条无缝连接。
+        // 硬编码 LINE_HEIGHT(20)> 字体实际高度(~16)会导致行间有空隙,
+        // │ 断开。回退:ascent+descent 为 0 时用 FONT_SIZE * 1.25。
+        let line_height = {
+            let h = probe.ascent + probe.descent;
+            if h > px(0.0) {
+                h
+            } else {
+                px(FONT_SIZE * 1.25)
+            }
         };
 
         // 按 bounds + cell 尺寸算出行列数,若变化则 resize PTY(让 claude/codex
@@ -626,7 +987,17 @@ impl Element for TerminalElement {
             v.maybe_resize(cols, rows, cell_w, line_height);
         });
 
-        paint_grid(&snap, selection, &preedit, bounds, cell_w, line_height, window, cx);
+        paint_grid(
+            &snap,
+            selection,
+            copy_flash,
+            &preedit,
+            bounds,
+            cell_w,
+            line_height,
+            window,
+            cx,
+        );
     }
 }
 
@@ -635,6 +1006,7 @@ impl Element for TerminalElement {
 fn paint_grid(
     snap: &RenderSnapshot,
     selection: Option<(CellPos, CellPos)>,
+    copy_flash: bool,
     preedit: &str,
     bounds: Bounds<Pixels>,
     cell_w: Pixels,
@@ -644,7 +1016,12 @@ fn paint_grid(
 ) {
     let origin = bounds.origin;
 
-    // 选区高亮(先画,压在文字下)。
+    // 选区高亮(先画,压在文字下)。复制时用更亮 alpha。
+    let sel_alpha = if copy_flash {
+        0.9
+    } else {
+        theme::SELECTION_ALPHA
+    };
     if let Some((a, b)) = selection {
         let (start, end) = order(a, b);
         for row in start.row..=end.row.min(snap.rows.saturating_sub(1)) {
@@ -660,7 +1037,7 @@ fn paint_grid(
                         origin: point(x, y),
                         size: size(w, line_height),
                     },
-                    theme::with_alpha(theme::SELECTION, theme::SELECTION_ALPHA),
+                    theme::with_alpha(theme::SELECTION, sel_alpha),
                 ));
             }
         }
@@ -693,20 +1070,38 @@ fn paint_grid(
             ));
         }
 
-        // 文字。
-        for col in 0..snap.cols {
-            let cell = snap.cell(line, col);
+        // 文字:batch 相同样式的连续 cell 成一个 run,一次性 shaping。
+        // 逐 cell 单独 shape_line 会导致 box-drawing 字符(╮│╰╯)间距不连续,
+        // 因为每个字符的 advance 可能与 cell_w 有亚像素差。batch 后由字体引擎
+        // 处理字符间距,box-drawing 线条才能无缝连接(照 Zed/alacritty 的做法)。
+        let mut c = 0;
+        while c < snap.cols {
+            let cell = snap.cell(line, c);
             if cell.width == 0 || cell.ch == ' ' {
+                c += 1;
                 continue;
             }
-            let x = origin.x + cell_w * (col as f32);
-            let mut buf = [0u8; 4];
-            let s = cell.ch.encode_utf8(&mut buf);
-            let run = run_for(s.len(), cell.fg, cell.bold);
-            let shaped =
-                window
-                    .text_system()
-                    .shape_line(s.to_string().into(), font_size_px(), &[run], None);
+            let start = c;
+            let fg = cell.fg;
+            let bold = cell.bold;
+            // 收集相同样式(fg + bold)的连续 cell。
+            let mut s = String::new();
+            while c < snap.cols {
+                let cell = snap.cell(line, c);
+                if cell.width == 0 || cell.ch == ' ' {
+                    break;
+                }
+                if cell.fg != fg || cell.bold != bold {
+                    break;
+                }
+                s.push(cell.ch);
+                c += 1;
+            }
+            let x = origin.x + cell_w * (start as f32);
+            let run = run_for(s.len(), fg, bold);
+            let shaped = window
+                .text_system()
+                .shape_line(s.into(), font_size_px(), &[run], None);
             let _ = shaped.paint(point(x, y), line_height, window, cx);
         }
     }
@@ -740,10 +1135,12 @@ fn paint_grid(
             }),
             strikethrough: None,
         };
-        let shaped =
-            window
-                .text_system()
-                .shape_line(preedit.to_string().into(), font_size_px(), &[run], None);
+        let shaped = window.text_system().shape_line(
+            preedit.to_string().into(),
+            font_size_px(),
+            &[run],
+            None,
+        );
         let _ = shaped.paint(point(x, y), line_height, window, cx);
     }
 
@@ -811,6 +1208,9 @@ fn order(a: CellPos, b: CellPos) -> (CellPos, CellPos) {
 
 /// 平台默认等宽字体名。`"monospace"` 是 CSS 通用族名,macOS CoreText 无对应
 /// 真实字体、解析会失败——必须用系统真实字体名。
+///
+/// 优先 Cascadia Mono(VS Code / Windows Terminal 默认终端字体,box-drawing
+/// 字符 `╮│╰╯─` 等专为终端设计、无缝连接),Consolas 作为回退。
 fn mono_font_family() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -822,7 +1222,7 @@ fn mono_font_family() -> &'static str {
     }
     #[cfg(target_os = "windows")]
     {
-        "Consolas"
+        "Cascadia Mono"
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -918,4 +1318,44 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
         }
     };
     Some(input::encode(&key, mods))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_boundary_alphanumeric() {
+        assert!(!TerminalView::word_boundary('a'));
+        assert!(!TerminalView::word_boundary('Z'));
+        assert!(!TerminalView::word_boundary('0'));
+        assert!(!TerminalView::word_boundary('_'));
+        assert!(!TerminalView::word_boundary('你'));
+        assert!(!TerminalView::word_boundary('é'));
+    }
+
+    #[test]
+    fn word_boundary_punctuation_and_space() {
+        assert!(TerminalView::word_boundary(' '));
+        assert!(TerminalView::word_boundary('.'));
+        assert!(TerminalView::word_boundary('-'));
+        assert!(TerminalView::word_boundary('/'));
+        assert!(TerminalView::word_boundary('|'));
+        assert!(TerminalView::word_boundary('\n'));
+    }
+
+    #[test]
+    fn trim_end_removes_trailing_spaces() {
+        assert_eq!("hello".trim_end(), "hello");
+        assert_eq!("hello   ".trim_end(), "hello");
+        assert_eq!("  hello  ".trim_end(), "  hello");
+        assert_eq!("   ".trim_end(), "");
+        assert_eq!("".trim_end(), "");
+    }
+
+    #[test]
+    fn trim_end_preserves_interior_spaces() {
+        assert_eq!("a b c".trim_end(), "a b c");
+        assert_eq!("a b c  ".trim_end(), "a b c");
+    }
 }

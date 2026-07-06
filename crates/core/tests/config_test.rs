@@ -110,11 +110,7 @@ fn alias_set_read_roundtrip_preserves_comments() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
     // 带注释 + 已有配置的文件。
-    std::fs::write(
-        &path,
-        "# 我的注释\n[worktree]\ndefault_base = \"main\"\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "# 我的注释\n[worktree]\ndefault_base = \"main\"\n").unwrap();
 
     // 设别名。
     config::set_alias(&path, "feature/x", "登录重构").unwrap();
@@ -134,7 +130,7 @@ fn alias_set_read_roundtrip_preserves_comments() {
     // 空串删除别名。
     config::set_alias(&path, "feature/x", "").unwrap();
     let loaded = config::load(&path).unwrap();
-    assert!(loaded.config.alias.get("feature/x").is_none());
+    assert!(!loaded.config.alias.contains_key("feature/x"));
 }
 
 #[test]

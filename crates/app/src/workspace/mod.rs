@@ -136,6 +136,8 @@ pub struct WorkspaceView {
     alias_input: Option<gpui::Entity<gpui_component::input::InputState>>,
     /// 设置面板表单(Some = 设置弹窗打开中)。见 [`SettingsForm`]。
     settings: Option<SettingsForm>,
+    /// agent 启动菜单是否展开(`+` 按钮触发)。展开时叠 overlay 列出 builtin agent。
+    agent_menu_open: bool,
     focus: FocusHandle,
 }
 
@@ -151,7 +153,9 @@ impl WorkspaceView {
         let registry = Registry::load_default().unwrap_or_default();
 
         // 校验候选路径是否真的是 git 仓库。
-        let repo = candidate.as_ref().and_then(|c| lucy_core::git::main_worktree_root(c));
+        let repo = candidate
+            .as_ref()
+            .and_then(lucy_core::git::main_worktree_root);
 
         let mut this = Self {
             repo: None,
@@ -167,6 +171,7 @@ impl WorkspaceView {
             editing_alias: None,
             alias_input: None,
             settings: None,
+            agent_menu_open: false,
             focus: cx.focus_handle(),
         };
 
@@ -330,7 +335,7 @@ impl WorkspaceView {
         );
         if run.had_failure() {
             self.set_status(
-                format!("worktree 已建,但 postCreate hook 有失败步骤(见日志)"),
+                "worktree 已建,但 postCreate hook 有失败步骤(见日志)".to_string(),
                 true,
             );
             // 不回滚 worktree(计划:hook 失败不删 worktree)。
@@ -579,6 +584,13 @@ impl Render for WorkspaceView {
                     }
                 }),
             )
+            // 菜单展开时 Esc 关闭(与遮罩点击关菜单互补)。
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                if this.agent_menu_open && ev.keystroke.key == "escape" {
+                    this.agent_menu_open = false;
+                    cx.notify();
+                }
+            }))
             .child(self.sidebar(cx))
             .child(splitter)
             .child(main);
@@ -594,6 +606,10 @@ impl Render for WorkspaceView {
         // 设置面板打开中 → 叠加设置弹窗。
         if self.settings.is_some() {
             root = root.child(self.settings_dialog(cx));
+        }
+        // agent 启动菜单展开 → 叠加下拉菜单(遮罩 + 卡片)。
+        if self.agent_menu_open {
+            root = root.child(self.agent_menu(cx));
         }
 
         root
@@ -616,13 +632,20 @@ mod tests {
     #[cfg(windows)]
     fn strips_unc_verbatim_prefix() {
         let p = PathBuf::from(r"\\?\UNC\server\share\foo");
-        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"\\server\share\foo"));
+        assert_eq!(
+            strip_verbatim_prefix(&p),
+            PathBuf::from(r"\\server\share\foo")
+        );
     }
 
     #[test]
     fn no_prefix_unchanged() {
         // 无 verbatim 前缀的路径原样返回。
-        let p = PathBuf::from(if cfg!(windows) { r"C:\Users\foo" } else { "/usr/foo" });
+        let p = PathBuf::from(if cfg!(windows) {
+            r"C:\Users\foo"
+        } else {
+            "/usr/foo"
+        });
         assert_eq!(strip_verbatim_prefix(&p), p);
     }
 

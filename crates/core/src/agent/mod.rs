@@ -27,6 +27,57 @@ pub struct AgentSpec {
     pub extra_env: BTreeMap<String, String>,
 }
 
+/// 内置 agent 注册条目 —— UI 菜单与 [`AgentSpec::builtin`] 的单一数据源。
+///
+/// 新增 agent 只需往 [`builtin_agents`] 加一条 + 在 app 层登记图标资产,
+/// 侧边栏菜单会自动列出它(菜单迭代 [`builtin_agents`],不硬编码)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentBuiltin {
+    /// 稳定 key(如 `claude`),用作 `AgentSpec::resolve` 的查找名与配置段名。
+    pub name: &'static str,
+    /// UI 显示名(如 `Claude`)。
+    pub display: &'static str,
+    /// 图标资产路径 key(如 `icons/claude.svg`),app 层按此加载 SVG。
+    pub icon: &'static str,
+    /// 可执行命令。
+    pub command: &'static str,
+    /// 命令参数(默认含各自的自动 / bypass 权限开关)。
+    pub args: &'static [&'static str],
+}
+
+/// 内置 agent 注册表 —— zero-config 时可用哪些 agent、各自默认怎么起。
+///
+/// 顺序即 UI 菜单的展示顺序。三条默认均以「自动工作 / bypass 权限」模式启动:
+/// - claude:`--dangerously-skip-permissions`(claude 无沙箱概念,跳过权限弹窗)
+/// - codex:`--dangerously-bypass-approvals-and-sandbox`(worktree 已是隔离边界,codex 沙箱多余且可能阻断 git 操作)
+/// - opencode:`--auto`(自动批准非显式 deny 的项)
+pub fn builtin_agents() -> &'static [AgentBuiltin] {
+    static AGENTS: &[AgentBuiltin] = &[
+        AgentBuiltin {
+            name: "claude",
+            display: "Claude",
+            icon: "icons/claude.svg",
+            command: "claude",
+            args: &["--dangerously-skip-permissions"],
+        },
+        AgentBuiltin {
+            name: "codex",
+            display: "Codex",
+            icon: "icons/codex.svg",
+            command: "codex",
+            args: &["--dangerously-bypass-approvals-and-sandbox"],
+        },
+        AgentBuiltin {
+            name: "opencode",
+            display: "OpenCode",
+            icon: "icons/opencode.svg",
+            command: "opencode",
+            args: &["--auto"],
+        },
+    ];
+    AGENTS
+}
+
 impl AgentSpec {
     /// 从配置里的某个 agent 预设构造规格。找不到该名字则返回 None。
     ///
@@ -48,20 +99,24 @@ impl AgentSpec {
         ))
     }
 
-    /// 用内置默认(claude / codex)构造规格 —— 当配置里没有对应 `[agents.*]` 时用。
+    /// 用内置默认构造规格 —— 当配置里没有对应 `[agents.*]` 时用。
     /// 未知名字返回 None。
     ///
-    /// claude 默认带 `--dangerously-skip-permissions`:本工具就是「一键在隔离
-    /// worktree 里起 agent 干活」,每次都手动确认权限太碎。用户若想收回,在
-    /// `.worktree.toml` 里显式写 `[agents.claude]`(走 [`from_config`]),自己的
-    /// args 会完全覆盖此默认。
+    /// 内置 agent 注册表是 UI 菜单与 resolve 的单一数据源(见 [`builtin_agents`])。
+    /// 三个 agent 默认均以「自动工作 / bypass 权限」模式启动:claude
+    /// `--dangerously-skip-permissions`、codex `--dangerously-bypass-approvals-and-sandbox`、opencode `--auto`。
+    /// 本工具的核心场景是「在隔离 worktree 里一键起 agent 干活」,每次手动确认
+    /// 权限太碎。用户若想收回,在 `.worktree.toml` 里显式写 `[agents.<name>]`
+    /// (走 [`from_config`]),自己的 args 会完全覆盖此默认。
     pub fn builtin(name: &str, cwd: PathBuf, worktree_env: &[(String, String)]) -> Option<Self> {
-        let (command, args): (&str, Vec<String>) = match name {
-            "claude" => ("claude", vec!["--dangerously-skip-permissions".to_string()]),
-            "codex" => ("codex", vec![]),
-            _ => return None,
-        };
-        Some(Self::build(name, command, args, cwd, worktree_env))
+        let entry = builtin_agents().iter().find(|a| a.name == name)?;
+        Some(Self::build(
+            entry.name,
+            entry.command,
+            entry.args.iter().map(|s| s.to_string()).collect(),
+            cwd,
+            worktree_env,
+        ))
     }
 
     /// 优先用配置预设,缺失则回落到内置默认。
@@ -127,15 +182,55 @@ mod tests {
     }
 
     #[test]
-    fn builtin_claude_and_codex_available_without_config() {
+    fn builtin_agents_contains_all_three() {
+        let agents = builtin_agents();
+        assert_eq!(agents.len(), 3);
+        assert_eq!(agents[0].name, "claude");
+        assert_eq!(agents[1].name, "codex");
+        assert_eq!(agents[2].name, "opencode");
+        // 每条都有非空 display / icon / command。
+        for a in agents {
+            assert!(!a.display.is_empty());
+            assert!(!a.icon.is_empty());
+            assert!(!a.command.is_empty());
+        }
+    }
+
+    #[test]
+    fn builtin_claude_codex_opencode_available_without_config() {
         let claude = AgentSpec::builtin("claude", PathBuf::from("/wt"), &[]).unwrap();
         assert_eq!(claude.command, "claude");
-        // claude 默认带 --dangerously-skip-permissions(见 builtin 文档)。
+        // claude 默认带 --dangerously-skip-permissions(见 builtin_agents 文档)。
         assert_eq!(claude.args, vec!["--dangerously-skip-permissions"]);
         let codex = AgentSpec::builtin("codex", PathBuf::from("/wt"), &[]).unwrap();
         assert_eq!(codex.command, "codex");
-        assert!(codex.args.is_empty());
+        // codex 默认 --dangerously-bypass-approvals-and-sandbox(worktree 已是隔离边界)。
+        assert_eq!(
+            codex.args,
+            vec!["--dangerously-bypass-approvals-and-sandbox"]
+        );
+        let opencode = AgentSpec::builtin("opencode", PathBuf::from("/wt"), &[]).unwrap();
+        assert_eq!(opencode.command, "opencode");
+        // opencode 默认 --auto(自动批准非显式 deny 的项)。
+        assert_eq!(opencode.args, vec!["--auto"]);
         assert!(AgentSpec::builtin("unknown", PathBuf::from("/wt"), &[]).is_none());
+    }
+
+    #[test]
+    fn config_preset_overrides_default_codex_args() {
+        // codex builtin 含 --dangerously-bypass-approvals-and-sandbox,但用户显式配 args → 完全覆盖,不合并。
+        let cfg = config::parse(
+            r#"
+            [agents.codex]
+            command = "codex"
+            args = ["--yolo"]
+        "#,
+        )
+        .unwrap()
+        .config;
+
+        let spec = AgentSpec::resolve(&cfg, "codex", PathBuf::from("/wt"), &[]).unwrap();
+        assert_eq!(spec.args, vec!["--yolo"]);
     }
 
     #[test]

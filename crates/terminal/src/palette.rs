@@ -124,9 +124,7 @@ pub fn resolve(color: Color, dynamic: &Colors) -> Rgb888 {
         Color::Indexed(i) => dynamic[i as usize]
             .map(Rgb888::from_rgb)
             .unwrap_or_else(|| indexed_256(i)),
-        Color::Named(n) => dynamic[n]
-            .map(Rgb888::from_rgb)
-            .unwrap_or_else(|| named(n)),
+        Color::Named(n) => dynamic[n].map(Rgb888::from_rgb).unwrap_or_else(|| named(n)),
     }
 }
 
@@ -160,7 +158,14 @@ mod tests {
     #[test]
     fn spec_color_passes_through() {
         let colors = Colors::default();
-        let got = resolve(Color::Spec(Rgb { r: 10, g: 20, b: 30 }), &colors);
+        let got = resolve(
+            Color::Spec(Rgb {
+                r: 10,
+                g: 20,
+                b: 30,
+            }),
+            &colors,
+        );
         assert_eq!(got, Rgb888::new(10, 20, 30));
     }
 

@@ -49,7 +49,10 @@ fn pty_output_flows_into_term() {
         dims(),
         None,
         // 用 sh -c 打印固定文本(printf 保证无额外 prompt 干扰)。
-        Some(("/bin/sh".into(), vec!["-c".into(), "printf 'HELLO_LUCY'".into()])),
+        Some((
+            "/bin/sh".into(),
+            vec!["-c".into(), "printf 'HELLO_LUCY'".into()],
+        )),
         vec![],
     )
     .expect("spawn session");
@@ -60,13 +63,9 @@ fn pty_output_flows_into_term() {
 
 #[test]
 fn interactive_echo_via_cat() {
-    let mut session = TerminalSession::spawn(
-        dims(),
-        None,
-        Some(("/bin/cat".into(), vec![])),
-        vec![],
-    )
-    .expect("spawn cat");
+    let mut session =
+        TerminalSession::spawn(dims(), None, Some(("/bin/cat".into(), vec![])), vec![])
+            .expect("spawn cat");
 
     // 给 cat 一点时间起来,然后写入。
     std::thread::sleep(Duration::from_millis(150));
@@ -84,7 +83,10 @@ fn is_a_real_tty() {
         None,
         Some((
             "/bin/sh".into(),
-            vec!["-c".into(), "test -t 0 && printf TTY_YES || printf TTY_NO".into()],
+            vec![
+                "-c".into(),
+                "test -t 0 && printf TTY_YES || printf TTY_NO".into(),
+            ],
         )),
         vec![],
     )
@@ -96,13 +98,9 @@ fn is_a_real_tty() {
 
 #[test]
 fn resize_does_not_panic() {
-    let mut session = TerminalSession::spawn(
-        dims(),
-        None,
-        Some(("/bin/cat".into(), vec![])),
-        vec![],
-    )
-    .expect("spawn");
+    let mut session =
+        TerminalSession::spawn(dims(), None, Some(("/bin/cat".into(), vec![])), vec![])
+            .expect("spawn");
     std::thread::sleep(Duration::from_millis(100));
 
     session.resize(TermDimensions::new(80, 24, 8, 16));

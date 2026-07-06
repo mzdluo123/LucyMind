@@ -66,6 +66,7 @@ impl Button {
     }
 
     /// 左侧图标(单色 SVG,跟按钮文字色染色)。
+    #[allow(dead_code)]
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
         self

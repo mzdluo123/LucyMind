@@ -103,7 +103,9 @@ impl EventListener for Proxy {
             AlacEvent::Wakeup => Some(ProxyEvent::Wakeup),
             AlacEvent::Title(t) => Some(ProxyEvent::Title(t)),
             AlacEvent::Bell => Some(ProxyEvent::Bell),
-            AlacEvent::ChildExit(status) => Some(ProxyEvent::ChildExit(status.code().unwrap_or(-1))),
+            AlacEvent::ChildExit(status) => {
+                Some(ProxyEvent::ChildExit(status.code().unwrap_or(-1)))
+            }
             AlacEvent::PtyWrite(s) => Some(ProxyEvent::PtyWrite(s.into_bytes())),
             // 其余事件(剪贴板/颜色查询/标题重置等)MVP 暂不处理。
             _ => None,
@@ -148,6 +150,22 @@ impl TerminalSession {
         let term = Arc::new(FairMutex::new(term));
 
         // 2) PTY 选项。
+        // Windows: CreateProcessW 只能执行 .exe,不能直接跑 .cmd/.ps1 等 shim。
+        // npm/pnpm 全局安装的 CLI(claude/codex 等)只有 .cmd shim,所以需要
+        // 用 cmd.exe /C 包装,让 cmd.exe 解析 PATHEXT 找到 .cmd。
+        #[cfg(target_family = "windows")]
+        let command = command.map(|(program, args)| {
+            if needs_cmd_wrapper(&program) {
+                let mut full = Vec::with_capacity(args.len() + 2);
+                full.push("/C".to_string());
+                full.push(program.clone());
+                full.extend(args);
+                ("cmd.exe".to_string(), full)
+            } else {
+                (program, args)
+            }
+        });
+
         let pty_options = PtyOptions {
             shell: command.map(|(program, args)| Shell::new(program, args)),
             working_directory,
@@ -162,7 +180,11 @@ impl TerminalSession {
         #[cfg(target_family = "unix")]
         let child_pid = pty.child().id() as i32;
         #[cfg(target_family = "windows")]
-        let child_pid = pty.child_watcher().pid().map(|p| p.get() as i32).unwrap_or(0);
+        let child_pid = pty
+            .child_watcher()
+            .pid()
+            .map(|p| p.get() as i32)
+            .unwrap_or(0);
 
         // 3) EventLoop:后台线程自动读 PTY → 解析进 Term → 发 Wakeup。
         let event_loop = EventLoop::new(
@@ -302,6 +324,25 @@ fn pty_options_drain(opts: &PtyOptions) -> bool {
     opts.drain_on_exit
 }
 
+/// Windows:判断命令是否需要 `cmd.exe /C` 包装。
+/// `CreateProcessW` 只能执行 `.exe`;`.cmd`/`.ps1`/无扩展名的 shim(NPM/pnpm 全局
+/// 安装的 CLI 常见形式)需要通过 cmd.exe 解析 PATHEXT 才能找到并执行。
+#[cfg(target_family = "windows")]
+fn needs_cmd_wrapper(program: &str) -> bool {
+    use std::path::Path;
+    let p = Path::new(program);
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) => !ext.eq_ignore_ascii_case("exe"),
+        None => {
+            // 无扩展名:可能是 PATH 上的 bare name(如 "codex"),cmd.exe 会按
+            // PATHEXT 查找 .cmd/.bat 等。cmd.exe /C 让它解析。
+            // 但如果路径已存在且有 .exe(which 已解析),不需要包装。
+            // 这里简单判断:无扩展名的一律包装(让 cmd.exe 处理 PATHEXT)。
+            true
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 可渲染快照:GPUI-agnostic 的一屏 cell 网格,供 app 层绘制。
 // 宽字符/颜色在此就地处理好,app 层不接触 alacritty 内部类型。
@@ -438,7 +479,11 @@ impl RenderSnapshot {
                 continue;
             }
 
-            let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+            let width = if flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            };
 
             grid[idx] = RenderCell {
                 ch: cell.c,
@@ -453,13 +498,14 @@ impl RenderSnapshot {
 
         // 光标:落在宽字符 spacer 上时回退一列(照 alacritty 的做法)。
         let cursor_point = content.cursor.point;
-        let cursor_vp =
-            alacritty_terminal::term::point_to_viewport(display_offset, cursor_point);
+        let cursor_vp = alacritty_terminal::term::point_to_viewport(display_offset, cursor_point);
         let cursor = match cursor_vp {
             Some(p) => CursorPos {
                 line: p.line,
                 col: p.column.0,
-                visible: term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
+                visible: term
+                    .mode()
+                    .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
             },
             None => CursorPos {
                 line: 0,
