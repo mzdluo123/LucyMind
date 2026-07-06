@@ -488,3 +488,180 @@ async fn send_agent_command_noop_without_terminal(cx: &mut TestAppContext) {
 
     shutdown_workspace(cx, &workspace);
 }
+
+#[gpui::test]
+async fn switch_tab_out_of_bounds_is_noop(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let _wt_path = create_worktree(cx, &workspace);
+
+    // 建第二个 tab(active=1)。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+    });
+    cx.run_until_parked();
+
+    // switch_tab(99) 越界 → no-op,active 仍是 1。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.switch_tab_for_test(99, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(1),
+        "out-of-bounds switch should be no-op"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn close_tab_out_of_bounds_is_noop(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    // close_tab(99) 越界 → no-op,tab 数不变。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(99, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "out-of-bounds close should be no-op"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_terminal_tab_noop_without_active(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    // 无 active worktree → new_terminal_tab 应 no-op,不 panic。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).active_tab_index())
+            .is_none(),
+        "no tab should exist without active worktree"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn send_agent_command_unknown_sets_error_status(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let _wt_path = create_worktree(cx, &workspace);
+
+    // 发不存在的 agent 名 → 设置错误状态。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| {
+            v.send_agent_command_for_test("nonexistent_agent", cx)
+        });
+    });
+    cx.run_until_parked();
+
+    let status = cx.read(|cx| workspace.read(cx).current_status().map(|s| s.to_string()));
+    assert!(
+        status
+            .as_deref()
+            .is_some_and(|s| s.contains("nonexistent_agent")),
+        "should set error status for unknown agent, got: {status:?}"
+    );
+    assert!(
+        cx.read(|cx| workspace.read(cx).status_is_error()),
+        "status should be marked as error"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn open_worktree_creates_first_tab(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    // 先建一个 worktree(会创建 group + tab)。
+    let wt_a = create_worktree(cx, &workspace);
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_a)),
+        1,
+        "wt A should have 1 tab"
+    );
+
+    // 切到主仓(active 变成主仓路径,主仓无 group)。
+    let main_path = cx.read(|cx| workspace.read(cx).worktree_paths()[0].clone());
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(main_path.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&main_path)),
+        1,
+        "open_worktree on main repo (no group) should create first tab"
+    );
+
+    // 切回 wt_a → tab 仍在。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(wt_a.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_a)),
+        1,
+        "wt A tab should be preserved"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn close_tab_then_new_tab_recreates_group(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    // 关最后一个 tab → group 被移除。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(0, cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        !cx.update(|cx| workspace.update(cx, |v, _| v.terminals_contains(&wt_path))),
+        "group should be removed after closing last tab"
+    );
+
+    // new_terminal_tab 应重新创建 group(active 仍是 wt_path)。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|cx| workspace.update(cx, |v, _| v.terminals_contains(&wt_path))),
+        "group should be recreated by new_terminal_tab"
+    );
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "should have 1 tab after recreating group"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}

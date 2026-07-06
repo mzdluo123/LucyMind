@@ -1071,4 +1071,66 @@ mod tests {
         assert_eq!(canon(&plain), canon(&verbatim));
         assert!(same_path(&plain, &verbatim));
     }
+
+    // ---- agent_command_string 引号转义测试 ----
+
+    fn spec(command: &str, args: &[&str]) -> AgentSpec {
+        AgentSpec {
+            name: "test".into(),
+            command: command.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: PathBuf::new(),
+            extra_env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn agent_command_string_simple_args() {
+        // 无空格/引号的参数直接拼接。
+        let s = WorkspaceView::agent_command_string(&spec("claude", &["--auto", "--verbose"]));
+        assert_eq!(s, "claude --auto --verbose\r");
+    }
+
+    #[test]
+    fn agent_command_string_arg_with_space_quoted() {
+        // 含空格的参数用双引号包裹。
+        let s = WorkspaceView::agent_command_string(&spec("sh", &["-c", "echo hello world"]));
+        assert_eq!(s, "sh -c \"echo hello world\"\r");
+    }
+
+    #[test]
+    fn agent_command_string_arg_with_double_quote_escaped() {
+        // 含双引号的参数:整体加引号 + 内部双引号转义为 \"。
+        let s = WorkspaceView::agent_command_string(&spec("sh", &["-c", "echo \"hi\""]));
+        assert_eq!(s, "sh -c \"echo \\\"hi\\\"\"\r");
+    }
+
+    #[test]
+    fn agent_command_string_arg_with_backslash_escaped() {
+        // 含反斜杠的参数(且含空格触发引号):反斜杠转义为 \\。
+        let s =
+            WorkspaceView::agent_command_string(&spec("cmd", &["/c", "echo C:\\path to\\file"]));
+        assert_eq!(s, "cmd /c \"echo C:\\\\path to\\\\file\"\r");
+    }
+
+    #[test]
+    fn agent_command_string_empty_arg_quoted() {
+        // 空参数用双引号包裹(否则 shell 看不到)。
+        let s = WorkspaceView::agent_command_string(&spec("cmd", &[""]));
+        assert_eq!(s, "cmd \"\"\r");
+    }
+
+    #[test]
+    fn agent_command_string_single_quote_not_escaped() {
+        // 单引号本身不转义(只在含空格时触发外层双引号包裹)。
+        let s = WorkspaceView::agent_command_string(&spec("sh", &["-c", "echo 'hi'"]));
+        assert_eq!(s, "sh -c \"echo 'hi'\"\r");
+    }
+
+    #[test]
+    fn agent_command_string_no_args() {
+        // 无参数:只有 command + \r。
+        let s = WorkspaceView::agent_command_string(&spec("claude", &[]));
+        assert_eq!(s, "claude\r");
+    }
 }

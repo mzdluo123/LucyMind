@@ -68,7 +68,7 @@ impl WorkspaceView {
                         .child(SharedString::from(repo_label)),
                 )
                 .child(
-                    // folder-open 图标按钮:与齿轮 / `+` 同风格(无背景无描边 +
+                    // folder-open 图标按钮:与齿轮同风格(无背景无描边 +
                     // group-hover 染色)。比文字按钮更紧凑、更编辑器风。
                     div()
                         .id("open-repo")
@@ -85,44 +85,6 @@ impl WorkspaceView {
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| {
                             this.open_repo_picker(cx);
-                        })),
-                ),
-        );
-
-        // 区域标签:Agents —— 标题行(label 左 + `+` 按钮右),与 WORKTREES
-        // 标题行(齿轮按钮)结构对称。点 `+` 直接建 worktree + 开 shell(不弹菜单;
-        // agent 启动移到 tab 栏按钮,往 shell 发命令)。
-        list = list.child(
-            div()
-                .mb(theme::space_sm())
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_color(rgb(theme::TEXT_DIM))
-                        .child(SharedString::from("AGENTS")),
-                )
-                .child(
-                    // `+` 启动按钮:单色 SVG,group-hover 变亮(与齿轮按钮同风格)。
-                    div()
-                        .id("agent-launcher")
-                        .group("agent-launcher-btn")
-                        .flex_none()
-                        .px(theme::space_xs())
-                        .cursor_pointer()
-                        .child(
-                            gpui::svg()
-                                .size(gpui::px(14.0))
-                                .path("icons/plus.svg")
-                                .text_color(rgb(theme::TEXT_FAINT))
-                                .group_hover("agent-launcher-btn", |s| {
-                                    s.text_color(rgb(theme::TEXT))
-                                }),
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.new_worktree(cx);
                         })),
                 ),
         );
@@ -297,6 +259,31 @@ impl WorkspaceView {
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         cx.stop_propagation();
                         this.open_alias_editor(&edit_branch, &edit_init, window, cx);
+                    })),
+            );
+        }
+
+        // `+` 新建 worktree:仅主仓行显示(在此仓库上开 worktree)。
+        // 与 ✎ / ✕ 同风格:文字按钮、group-hover 染色、stop_propagation 防误触行点击。
+        if is_main {
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("new-wt-{i}")))
+                    .group("new-wt-btn")
+                    .flex_none()
+                    .px(theme::space_xs())
+                    .cursor_pointer()
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(
+                        gpui::svg()
+                            .size(gpui::px(14.0))
+                            .path("icons/plus.svg")
+                            .text_color(rgb(theme::TEXT_FAINT))
+                            .group_hover("new-wt-btn", |s| s.text_color(rgb(theme::TEXT))),
+                    )
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.new_worktree(cx);
                     })),
             );
         }
