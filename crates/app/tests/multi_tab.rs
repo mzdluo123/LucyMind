@@ -412,6 +412,8 @@ async fn terminal_title_updates_from_osc(cx: &mut TestAppContext) {
     // 轮询 title 是否被更新(PTY reader 线程读到 OSC 序列 → Term 解析 →
     // TermEvent::Title → drain_events → view.title)。
     // GPUI test mock 时钟不推进 16ms 轮询循环,需手动 poll_events_for_test。
+    // 用 title_seen_for_test 检查历史(而非当前 title):bash 等交互 shell 的
+    // PROMPT_COMMAND 会在命令后覆写标题,可能在我们 poll 前就覆盖 MARKER_TITLE。
     wait_for(
         cx,
         |cx| {
@@ -419,7 +421,7 @@ async fn terminal_title_updates_from_osc(cx: &mut TestAppContext) {
                 cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()));
             term.is_some_and(|t| {
                 cx.update(|cx| t.update(cx, |tv, _| tv.poll_events_for_test()));
-                cx.read(|cx| t.read(cx).title().is_some_and(|t| t == "MARKER_TITLE"))
+                cx.read(|cx| t.read(cx).title_seen_for_test("MARKER_TITLE"))
             })
         },
         Duration::from_secs(15),

@@ -76,6 +76,13 @@ pub struct TerminalView {
     context_menu_open: bool,
     /// 菜单弹出位置(窗口坐标,渲染时转成相对偏移)。
     context_menu_pos: Point<Pixels>,
+
+    // ---- 测试专用:记录所有出现过的标题 ----
+    // bash 等交互 shell 的 PROMPT_COMMAND 会在命令执行后覆写标题,
+    // 导致 MARKER_TITLE 被后续 prompt 标题覆盖。测试需要检查"是否曾出现"
+    // 而非"当前是否"(poll 间隔 20ms 可能错过瞬态值)。
+    #[cfg(feature = "test-support")]
+    test_titles: Vec<String>,
 }
 
 impl TerminalView {
@@ -152,6 +159,8 @@ impl TerminalView {
             copy_flash: None,
             context_menu_open: false,
             context_menu_pos: point(px(0.0), px(0.0)),
+            #[cfg(feature = "test-support")]
+            test_titles: Vec::new(),
         })
     }
 
@@ -213,7 +222,9 @@ impl TerminalView {
                     self.snapshot = self.session.snapshot();
                 }
                 TermEvent::Title(t) => {
-                    self.title = Some(t);
+                    self.title = Some(t.clone());
+                    #[cfg(feature = "test-support")]
+                    self.test_titles.push(t);
                     self.snapshot = self.session.snapshot();
                 }
                 TermEvent::ChildExit(code) => {
@@ -228,6 +239,16 @@ impl TerminalView {
     #[cfg(feature = "test-support")]
     pub fn is_exited(&self) -> Option<i32> {
         self.exited
+    }
+
+    /// 检查是否曾出现包含 `needle` 的标题(即使后续被 shell prompt 覆盖)。
+    ///
+    /// bash 等交互 shell 的 PROMPT_COMMAND 会在命令后覆写标题,导致
+    /// `title()` 只能看到最后一次(通常是 prompt 标题,非测试标记)。
+    /// 此方法检查 `poll_events_for_test` 记录的全部标题历史。
+    #[cfg(feature = "test-support")]
+    pub fn title_seen_for_test(&self, needle: &str) -> bool {
+        self.test_titles.iter().any(|t| t.contains(needle))
     }
 
     /// 当前选区文本(已 trim 尾随空格、规范化顺序)。无选区返回 None。
