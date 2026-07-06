@@ -48,5 +48,9 @@ name = "LucyMind"
 identifier = "win.rainchan.lucymind"
 short_description = "Git worktree + AI agent 编排工具"
 category = "public.app-category.developer-tools"
+# 应用图标(Dock/Finder):与侧边栏 LUCYMIND 左侧 logo 同构的实心配色版
+# (深色圆角底 + 冷白 logo)。由 assets/app-icon.svg 经 magick+iconutil 生成
+# 各尺寸打包成 .icns。cargo bundle 会把它放进 .app 并写进 Info.plist。
+icon = ["assets/LucyMind.icns"]
 # 最低系统版本(GPUI/Metal 需较新 macOS)。
 osx_minimum_system_version = "11.0"

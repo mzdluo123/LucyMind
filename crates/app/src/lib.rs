@@ -5,6 +5,7 @@
 //! 做 headless UI 测试。
 
 pub mod assets;
+mod path_env;
 pub mod terminal_view;
 pub mod theme;
 pub mod ui;
@@ -29,6 +30,12 @@ pub fn run() {
             .default_filter_or("warn,lucy_app=info,lucy_terminal=info,lucy_core=info"),
     )
     .init();
+
+    // 修复 PATH:从 .app(Finder/Dock)启动时进程 PATH 极简,不含用户 shell 里
+    // 加的目录(claude/codex 常装在 ~/.local/bin、/opt/homebrew/bin)。这里趁
+    // GPUI 尚未起线程(单线程,改 env 安全)从登录 shell 取回完整 PATH,后续起的
+    // agent/shell/hook 才找得到命令。见 [`path_env`]。
+    path_env::fix_path_from_login_shell();
 
     // 候选仓库:当前工作目录。new() 会校验它是不是 git 仓库 —— 是则用(cargo run
     // 场景),否则以空态启动并弹目录选择器(.app 双击启动 cwd 不是仓库的场景)。

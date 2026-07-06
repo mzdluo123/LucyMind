@@ -1,0 +1,28 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 应用图标(Dock/Finder 用):与侧边栏 logo.svg 同构,但改为实心配色版
+       ——深色圆角底板 + 冷白 logo。logo.svg 那版是 GPUI 单色 mask(靠挖空露
+       背景),做位图图标必须自带背景与配色,否则透明底在浅色 Dock 上看不见。
+
+       坐标:logo 原图 100×100,这里整体 ×10 到 1024 画布并居中留边。
+       三个圆:大圈头(实心白)、左上发髻(实心白)、右下小圆(填背景色=视觉挖空)。 -->
+  <defs>
+    <clipPath id="round">
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <!-- 底板:near-black,与 app 主背景 theme::BG(#0e0e10)一致 -->
+    <rect x="0" y="0" width="1024" height="1024" fill="#0e0e10"/>
+    <!-- logo 组:原 100 单位系放大 ×8、居中(偏移让图形落在画布中部)。
+         原图形大致占 16..76 (x) / -0..74 (y);取 scale 8、平移居中。 -->
+    <g transform="translate(168, 196) scale(8)">
+      <!-- 冷白填充:头 + 发髻 -->
+      <path fill="#e8e8ee" d="
+        M 76 46 A 30 30 0 1 1 15.999 46 A 30 30 0 1 1 76 46 Z
+        M 36 20 A 8 8 0 1 1 19.999 20 A 8 8 0 1 1 36 20 Z
+      "/>
+      <!-- 右下小圆:填背景色 = 视觉上的挖空(与 mask 版一致的"黑点") -->
+      <circle cx="64" cy="64" r="10" fill="#0e0e10"/>
+    </g>
+  </g>
+</svg>

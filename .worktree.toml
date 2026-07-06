@@ -44,3 +44,5 @@ args = ["--auto"]
 "lucy/session-44" = "1"
 "lucy/session-45" = "1"
 "lucy/merry-sage-wolf-grove" = "test"
+"lucy/proud-onyx-lynx-vale" = "终端padding"
+"lucy/brave-slate-elk-cliff" = "半个格子修复"

@@ -166,6 +166,10 @@ impl TerminalSession {
             }
         });
 
+        // Windows 上 tty::Options 多一个平台专属字段 escape_args —— 靠
+        // ..Default::default() 补齐,故必须保留。非 Windows(mac/Linux)所有字段
+        // 已显式指定,新版 clippy 会报 needless_update;此处局部 allow 抑制。
+        #[allow(clippy::needless_update)]
         let pty_options = PtyOptions {
             shell: command.map(|(program, args)| Shell::new(program, args)),
             working_directory,
