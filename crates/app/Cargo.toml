@@ -8,6 +8,16 @@ license.workspace = true
 name = "lucy"
 path = "src/main.rs"
 
+[lib]
+name = "lucy_app"
+path = "src/lib.rs"
+
+# 测试专用特性:解锁 #[cfg(feature = "test-support")] 的内部 accessor
+# (WorkspaceView/TerminalView 的测试方法)。集成测试(tests/)通过
+# [dev-dependencies] 自引用启用;生产二进制不含。
+[features]
+test-support = []
+
 # GPUI 应用层。GPUI(git/pre-1.0 依赖)刻意留到 U8-spike 引入 ——
 # 那是全项目最高风险、无先例的部分,单独作为技术验证先打通,
 # 不该拖累 U1 脚手架构建。
@@ -22,6 +32,14 @@ log.workspace = true
 gpui = "0.2.2"
 env_logger = "0.11"
 gpui-component = "0.5.1"
+
+# 集成测试:`test-support` 解锁 gpui 的 TestAppContext / #[gpui::test] /
+# VisualTestContext(headless,无需真实 GPU/窗口)。tempfile 造临时 git 仓库。
+# 自引用启用本 crate 的 test-support feature,让 tests/ 能用内部 accessor。
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+tempfile = "3"
+lucy-app = { path = ".", features = ["test-support"] }
 
 # cargo-bundle:打包成标准 macOS .app(补 Info.plist,让全屏/菜单栏/Dock
 # 等系统集成正常 —— 裸二进制缺这些)。`cargo bundle --release` 生成 .app。

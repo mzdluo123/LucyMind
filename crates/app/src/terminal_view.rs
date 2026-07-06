@@ -152,6 +152,52 @@ impl TerminalView {
         self.session.shutdown();
     }
 
+    // ---------------- 测试 accessor(仅测试构建可见)----------------
+    // 集成测试(tests/)需观察内部状态(snapshot/选区/exit/dimensions),但字段私有。
+    // 这些 #[cfg(test)] pub fn 不进生产二进制,API 表面不膨胀。
+
+    /// 当前可渲染快照的文本(按行拼接,width==0 的宽字符占位跳过)。
+    #[cfg(feature = "test-support")]
+    pub fn snapshot_text(&self) -> String {
+        let snap = &self.snapshot;
+        let mut s = String::new();
+        for line in 0..snap.rows {
+            for col in 0..snap.cols {
+                let cell = snap.cell(line, col);
+                if cell.width != 0 {
+                    s.push(cell.ch);
+                }
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    /// 子进程是否已退出(及退出码)。测试断言 agent/shell 结束。
+    #[cfg(feature = "test-support")]
+    pub fn is_exited(&self) -> Option<i32> {
+        self.exited
+    }
+
+    /// 当前选区文本(已 trim 尾随空格、规范化顺序)。无选区返回 None。
+    #[cfg(feature = "test-support")]
+    pub fn selection_text(&self) -> Option<String> {
+        self.selected_text()
+    }
+
+    /// 是否有非空选区(start != end)。
+    #[cfg(feature = "test-support")]
+    pub fn has_selection(&self) -> bool {
+        self.selection.map(|(a, b)| a != b).unwrap_or(false)
+    }
+
+    /// 当前 PTY 尺寸(列 × 行)。测试断言 resize 生效。
+    #[cfg(feature = "test-support")]
+    pub fn dimensions(&self) -> (usize, usize) {
+        let d = self.session.dimensions();
+        (d.columns, d.screen_lines)
+    }
+
     /// 若行列数变化则 resize PTY + Term(paint 时按 bounds 调用)。
     /// cell 像素尺寸一并传给内核用于向终端程序报告像素尺寸。
     fn maybe_resize(

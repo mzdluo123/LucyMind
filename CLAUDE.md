@@ -30,6 +30,31 @@ cargo clippy --all-targets
 RUST_LOG=lucy_terminal=debug cargo run -p lucy-app
 ```
 
+## app 层 UI 集成测试(`#[gpui::test]`)
+
+app 层用 GPUI 的 `TestAppContext`(headless,无需真实 GPU/窗口)做 UI 集成测试,
+覆盖 `WorkspaceView` 状态机(启动/worktree CRUD/agent 菜单/终端渲染)。测试在
+`crates/app/tests/`,共享基建在 `tests/common/mod.rs`。
+
+```bash
+cargo test -p lucy-app          # 跑全部(含 #[gpui::test])
+cargo test -p lucy-app --test smoke        # 单个测试文件
+cargo test -p lucy-app --test new_worktree # 单个文件
+```
+
+**关键约定:**
+- `#[gpui::test]` 异步测试签名为 `async fn(cx: &mut TestAppContext)`。
+- `tests/common/mod.rs` 提供 `temp_repo()`(临时 git 仓库)、`build_workspace(cx, repo)`
+  (headless 构造 `WorkspaceView`)、`wait_for(cx, predicate, timeout)`(轮询异步完成)、
+  `shutdown_workspace(cx, &workspace)`(停终端 + 排空,避免 leak-detection 误报)。
+- `WorkspaceView`/`TerminalView` 的内部状态通过 `#[cfg(feature = "test-support")]`-gated
+  `pub fn` accessor 暴露(如 `active_path`/`worktree_count`/`snapshot_text`)。该 feature
+  仅在 `cargo test` 时启用(`[dev-dependencies] lucy-app = { features = ["test-support"] }`)。
+- `TestPlatform` 未实现 `prompt_for_paths`(原生文件选择器)—— 测试用
+  `WorkspaceView::new_for_test`(不弹 prompt)+ `set_repo_for_test` 注入仓库。
+- registry 持久化路径用 `set_registry_path_for_test` 隔离到 tempdir,避免污染真实用户 session。
+- **新增 UI 功能改动必须伴随 `#[gpui::test]`** —— `cargo test -p lucy-app` 是 UI 行为的自动化验证门禁。
+
 ## 架构：三层 crate，依赖单向向下
 
 分层的核心动机是**把两个 pre-1.0 的不稳定依赖（GPUI、alacritty_terminal）圈进隔离层**，让下层逻辑保持纯净、可移植、可单测。

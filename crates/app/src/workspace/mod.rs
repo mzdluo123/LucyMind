@@ -139,6 +139,10 @@ pub struct WorkspaceView {
     /// agent 启动菜单是否展开(`+` 按钮触发)。展开时叠 overlay 列出 builtin agent。
     agent_menu_open: bool,
     focus: FocusHandle,
+    /// 测试用:覆盖 registry 持久化路径(None = 用默认路径 `~/Library/...`)。
+    /// 测试设为 tempdir,避免污染真实用户的 session 注册表。
+    #[cfg(feature = "test-support")]
+    registry_path: Option<PathBuf>,
 }
 
 /// 侧边栏宽度范围。
@@ -150,14 +154,36 @@ impl WorkspaceView {
     /// 启动:给一个候选仓库路径(通常来自 cwd)。若它是有效 git 仓库则用,
     /// 否则以空态启动并自动弹目录选择器(.app 双击启动时 cwd 不是仓库的场景)。
     pub fn new(cx: &mut Context<Self>, candidate: Option<PathBuf>) -> Self {
-        let registry = Registry::load_default().unwrap_or_default();
-
-        // 校验候选路径是否真的是 git 仓库。
+        let mut this = Self::construct(cx);
         let repo = candidate
             .as_ref()
             .and_then(lucy_core::git::main_worktree_root);
+        match repo {
+            Some(r) => this.set_repo(r),
+            None => this.open_repo_picker(cx), // 无有效仓库 → 启动即弹目录选择器
+        }
+        this
+    }
 
-        let mut this = Self {
+    /// 测试专用构造:同 [`new`](Self::new) 但**不弹 `open_repo_picker`**
+    /// (TestPlatform 未实现 `prompt_for_paths`,会 panic)。空态(None / 非 git
+    /// 目录)直接进 `repo == None` 空态,测试用 `set_repo_for_test` 注入仓库。
+    #[cfg(feature = "test-support")]
+    pub fn new_for_test(cx: &mut Context<Self>, candidate: Option<PathBuf>) -> Self {
+        let mut this = Self::construct(cx);
+        let repo = candidate
+            .as_ref()
+            .and_then(lucy_core::git::main_worktree_root);
+        if let Some(r) = repo {
+            this.set_repo(r);
+        }
+        this
+    }
+
+    /// 公共构造:填默认字段(不弹 prompt、不 set_repo)。
+    fn construct(cx: &mut Context<Self>) -> Self {
+        let registry = Registry::load_default().unwrap_or_default();
+        Self {
             repo: None,
             config: WorktreeConfig::default(),
             worktrees: Vec::new(),
@@ -173,13 +199,9 @@ impl WorkspaceView {
             settings: None,
             agent_menu_open: false,
             focus: cx.focus_handle(),
-        };
-
-        match repo {
-            Some(r) => this.set_repo(r),
-            None => this.open_repo_picker(cx), // 无有效仓库 → 启动即弹目录选择器
+            #[cfg(feature = "test-support")]
+            registry_path: None,
         }
-        this
     }
 
     /// 设置仓库根:加载其配置、刷新 worktree 列表。
@@ -265,7 +287,21 @@ impl WorkspaceView {
     }
 
     fn persist_registry(&self) {
-        if let Err(e) = self.registry.save_default() {
+        let result = {
+            #[cfg(feature = "test-support")]
+            {
+                if let Some(p) = &self.registry_path {
+                    self.registry.save(p)
+                } else {
+                    self.registry.save_default()
+                }
+            }
+            #[cfg(not(feature = "test-support"))]
+            {
+                self.registry.save_default()
+            }
+        };
+        if let Err(e) = result {
             log::warn!("保存 session 注册表失败: {e}");
         }
     }
@@ -504,6 +540,156 @@ impl WorkspaceView {
             },
         )
         .detach();
+    }
+
+    // ---------------- 测试 accessor(仅测试构建可见)----------------
+    // 集成测试(tests/)需观察状态机内部字段,但这些字段私有。以下 #[cfg(test)]
+    // pub fn 不进生产二进制,API 表面不膨胀。生产代码不应调用。
+
+    /// 当前仓库根(None = 空态未选仓库)。
+    #[cfg(feature = "test-support")]
+    pub fn repo(&self) -> Option<&std::path::Path> {
+        self.repo.as_deref()
+    }
+
+    /// 当前 active 终端路径(None = 无活动终端)。
+    #[cfg(feature = "test-support")]
+    pub fn active_path(&self) -> Option<&std::path::Path> {
+        self.active.as_deref()
+    }
+
+    /// worktree 列表条数(含 main 行)。
+    #[cfg(feature = "test-support")]
+    pub fn worktree_count(&self) -> usize {
+        self.worktrees.len()
+    }
+
+    /// worktree 路径列表(规范化后)。
+    #[cfg(feature = "test-support")]
+    pub fn worktree_paths(&self) -> Vec<PathBuf> {
+        self.worktrees.iter().map(|w| w.path.clone()).collect()
+    }
+
+    /// agent 启动菜单是否展开。
+    #[cfg(feature = "test-support")]
+    pub fn is_agent_menu_open(&self) -> bool {
+        self.agent_menu_open
+    }
+
+    /// 当前状态消息文本(None = 无状态)。
+    #[cfg(feature = "test-support")]
+    pub fn current_status(&self) -> Option<&str> {
+        self.status.as_ref().map(|s| s.text.as_ref())
+    }
+
+    /// 当前状态是否为错误。
+    #[cfg(feature = "test-support")]
+    pub fn status_is_error(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.is_error)
+    }
+
+    /// 是否有待确认的关闭(脏 worktree 弹窗)。
+    #[cfg(feature = "test-support")]
+    pub fn has_pending_close(&self) -> bool {
+        self.pending_close.is_some()
+    }
+
+    /// 待确认关闭的分支名。
+    #[cfg(feature = "test-support")]
+    pub fn pending_close_branch(&self) -> Option<&str> {
+        self.pending_close.as_ref().map(|p| p.branch.as_str())
+    }
+
+    /// 指定路径是否有活动终端。
+    #[cfg(feature = "test-support")]
+    pub fn terminals_contains(&self, path: &std::path::Path) -> bool {
+        self.terminals.contains_key(&canon(path))
+    }
+
+    /// 设置面板是否打开。
+    #[cfg(feature = "test-support")]
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// 正在编辑别名的分支名(None = 未在编辑)。
+    #[cfg(feature = "test-support")]
+    pub fn editing_alias(&self) -> Option<&str> {
+        self.editing_alias.as_deref()
+    }
+
+    /// 该路径是否由本工具建(注册表标记)。
+    #[cfg(feature = "test-support")]
+    pub fn is_ours_path(&self, path: &std::path::Path) -> bool {
+        self.is_ours(path)
+    }
+
+    /// 是否是主仓库本身(不可关闭)。
+    #[cfg(feature = "test-support")]
+    pub fn is_main_repo_path(&self, path: &std::path::Path) -> bool {
+        self.is_main_repo(path)
+    }
+
+    /// 取某路径终端的引用(测试需读终端 snapshot/selection)。
+    #[cfg(feature = "test-support")]
+    pub fn terminal_at(&self, path: &std::path::Path) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(&canon(path))
+    }
+
+    /// 直接设置仓库(测试绕过 open_repo_picker 注入 temp repo)。
+    #[cfg(feature = "test-support")]
+    pub fn set_repo_for_test(&mut self, repo: PathBuf) {
+        self.set_repo(repo);
+    }
+
+    /// 直接触发 new_worktree_and_agent(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn new_worktree_and_agent_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        self.new_worktree_and_agent(agent_name, cx);
+    }
+
+    /// 直接触发 request_close(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn request_close_for_test(
+        &mut self,
+        wt_path: PathBuf,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_close(wt_path, branch, cx);
+    }
+
+    /// 直接触发 confirm_close(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn confirm_close_for_test(&mut self, cx: &mut Context<Self>) {
+        self.confirm_close(cx);
+    }
+
+    /// 直接触发 cancel_close(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn cancel_close_for_test(&mut self, cx: &mut Context<Self>) {
+        self.cancel_close(cx);
+    }
+
+    /// 直接打开 agent 菜单(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn open_agent_menu_for_test(&mut self, cx: &mut Context<Self>) {
+        self.agent_menu_open = true;
+        cx.notify();
+    }
+
+    /// 停掉所有终端(测试清理,避免 leak-detection 误报)。
+    #[cfg(feature = "test-support")]
+    pub fn shutdown_all_terminals_for_test(&mut self, cx: &mut Context<Self>) {
+        for term in self.terminals.values() {
+            term.update(cx, |t, _| t.shutdown());
+        }
+    }
+
+    /// 设置 registry 持久化路径(测试隔离,避免污染真实用户 session 注册表)。
+    #[cfg(feature = "test-support")]
+    pub fn set_registry_path_for_test(&mut self, path: PathBuf) {
+        self.registry_path = Some(path);
     }
 }
 
