@@ -15,6 +15,7 @@ mod dialogs;
 mod settings;
 mod sidebar;
 mod status_bar;
+mod tabs;
 
 use std::path::PathBuf;
 
@@ -112,6 +113,26 @@ struct SettingsForm {
     copy_files: gpui::Entity<gpui_component::input::InputState>,
 }
 
+/// 一个终端 tab(终端 Entity + 静态回退标题)。
+///
+/// 静态标题在创建时确定(所有 tab 都是 "Shell"),作为 tab 栏显示的回退。
+/// 终端可能通过 OSC 0/2 协议发动态标题(`\x1b]0;<title>\x07`),tab 栏渲染时
+/// 优先取 `terminal.title()`,无动态标题时回退到此静态标题。
+struct TerminalTab {
+    terminal: Entity<TerminalView>,
+    /// 静态回退标题(终端未发 OSC 0/2 时显示)。
+    title: String,
+}
+
+/// 一个 worktree 的终端组(多个 tab + 当前 active tab 索引)。
+///
+/// 切 worktree 时 `active_tab` 自动恢复(每个 group 独立记忆)。关闭最后一个
+/// tab 后 group 从 `terminals` map 移除(worktree 仍在侧边栏)。
+struct TerminalGroup {
+    tabs: Vec<TerminalTab>,
+    active_tab: usize,
+}
+
 pub struct WorkspaceView {
     /// 当前仓库根。None = 尚未选仓库(显示 pick a directory 空态)。
     repo: Option<PathBuf>,
@@ -119,9 +140,9 @@ pub struct WorkspaceView {
     worktrees: Vec<WorktreeEntry>,
     /// 本工具开的 session 注册表(标记哪些 worktree 是我们建的)。
     registry: Registry,
-    /// 每个本工具 worktree 路径 → 其终端 Entity(用于关闭时停 agent)。
-    terminals: std::collections::HashMap<PathBuf, Entity<TerminalView>>,
-    /// 当前显示在主区的终端路径。
+    /// 每个 worktree 路径 → 其终端组(多 tab)。key 用 `canon()` 规范化路径。
+    terminals: std::collections::HashMap<PathBuf, TerminalGroup>,
+    /// 当前显示在主区的 worktree 路径(不是 tab 索引;tab 级 active 存在 group 里)。
     active: Option<PathBuf>,
     status: Option<Status>,
     /// 待确认的关闭(有未提交改动时弹窗)。
@@ -136,8 +157,6 @@ pub struct WorkspaceView {
     alias_input: Option<gpui::Entity<gpui_component::input::InputState>>,
     /// 设置面板表单(Some = 设置弹窗打开中)。见 [`SettingsForm`]。
     settings: Option<SettingsForm>,
-    /// agent 启动菜单是否展开(`+` 按钮触发)。展开时叠 overlay 列出 builtin agent。
-    agent_menu_open: bool,
     focus: FocusHandle,
     /// 测试用:覆盖 registry 持久化路径(None = 用默认路径 `~/Library/...`)。
     /// 测试设为 tempdir,避免污染真实用户的 session 注册表。
@@ -197,7 +216,6 @@ impl WorkspaceView {
             editing_alias: None,
             alias_input: None,
             settings: None,
-            agent_menu_open: false,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
             registry_path: None,
@@ -255,35 +273,52 @@ impl WorkspaceView {
         self.repo.as_deref().is_some_and(|r| same_path(path, r))
     }
 
-    /// 打开一个 worktree:已有终端则切过去;没有则在该目录起一个默认 shell。
+    /// 打开一个 worktree:已有终端组则切过去;没有则在该目录起一个默认 shell tab。
     fn open_worktree(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
         // 统一用规范化路径作 key —— 避免同一 worktree 因 /private 前缀被当两个。
         let wt_path = canon(&wt_path);
         if !self.terminals.contains_key(&wt_path) {
-            // 没有活动终端(存量 worktree)→ 起一个默认 shell 会话。
-            let wt_env = HookContext {
-                worktree_path: wt_path.clone(),
-                worktree_branch: String::new(),
-                worktree_name: wt_path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                repo_root: self.repo.clone().unwrap_or_default(),
-            }
-            .env_vars();
-            let env: Vec<(String, String)> =
-                std::iter::once(("TERM".to_string(), "xterm-256color".to_string()))
-                    .chain(wt_env)
-                    .collect();
-
-            let cwd = wt_path.clone();
-            let terminal = cx.new(|cx| {
-                TerminalView::new(cx, Some(cwd), None, env).expect("failed to start shell terminal")
-            });
-            self.terminals.insert(wt_path.clone(), terminal);
+            // 没有终端组(存量 worktree)→ 起一个默认 shell tab。
+            let tab = self.spawn_shell_tab(&wt_path, cx);
+            self.terminals.insert(
+                wt_path.clone(),
+                TerminalGroup {
+                    tabs: vec![tab],
+                    active_tab: 0,
+                },
+            );
         }
         self.active = Some(wt_path);
         cx.notify();
+    }
+
+    /// 起一个默认 shell 终端 tab(cwd = worktree 路径,注入 TERM + worktree env)。
+    /// 供 `open_worktree`(无 group 时建首个 tab)、`new_worktree`(侧边栏 `+` 建
+    /// worktree 后开首个 tab)、`new_terminal_tab`(tab 栏 `+` 新建 tab)复用。
+    fn spawn_shell_tab(&self, wt_path: &std::path::Path, cx: &mut Context<Self>) -> TerminalTab {
+        let wt_env = HookContext {
+            worktree_path: wt_path.to_path_buf(),
+            worktree_branch: String::new(),
+            worktree_name: wt_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            repo_root: self.repo.clone().unwrap_or_default(),
+        }
+        .env_vars();
+        let env: Vec<(String, String)> =
+            std::iter::once(("TERM".to_string(), "xterm-256color".to_string()))
+                .chain(wt_env)
+                .collect();
+
+        let cwd = wt_path.to_path_buf();
+        let terminal = cx.new(|cx| {
+            TerminalView::new(cx, Some(cwd), None, env).expect("failed to start shell terminal")
+        });
+        TerminalTab {
+            terminal,
+            title: "Shell".to_string(),
+        }
     }
 
     fn persist_registry(&self) {
@@ -320,8 +355,12 @@ impl WorkspaceView {
         };
     }
 
-    /// 主流程:建 worktree → postCreate hook → 起 agent 到终端。
-    fn new_worktree_and_agent(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+    /// 主流程:建 worktree → postCreate hook → 开一个 shell 终端 tab。
+    ///
+    /// agent 不再自动 spawn —— 用户在新 shell 里通过 tab 栏的 agent 按钮发命令
+    /// 启动(`send_agent_command`),有更多控制空间(可先跑命令、可 Ctrl+C 回到
+    /// shell、同终端跑多个 agent)。
+    fn new_worktree(&mut self, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             self.set_status("请先打开一个 git 仓库", true);
             return;
@@ -377,53 +416,49 @@ impl WorkspaceView {
             // 不回滚 worktree(计划:hook 失败不删 worktree)。
         }
 
-        // 3) 组装 agent spec + 起终端。
-        let wt_env = ctx.env_vars();
-        let spec = AgentSpec::resolve(&self.config, agent_name, wt_path.clone(), &wt_env);
-        let Some(spec) = spec else {
-            self.set_status(format!("未知 agent:{agent_name}"), true);
-            return;
-        };
-
-        let command = Some((spec.command.clone(), spec.args.clone()));
-        let env: Vec<(String, String)> = spec.extra_env.into_iter().collect();
-        let cwd = spec.cwd.clone();
-
-        let terminal = cx.new(|cx| {
-            TerminalView::new(cx, Some(cwd), command, env).expect("failed to start agent terminal")
-        });
-        // 统一用规范化路径作 key(与 open_worktree / is_active 一致)。
+        // 3) 开 shell 终端 tab(不自动起 agent;用户通过 tab 栏 agent 按钮发命令)。
         let wt_key = canon(&wt_path);
-        self.terminals.insert(wt_key.clone(), terminal);
+        let tab = self.spawn_shell_tab(&wt_key, cx);
+        self.terminals.insert(
+            wt_key.clone(),
+            TerminalGroup {
+                tabs: vec![tab],
+                active_tab: 0,
+            },
+        );
         self.active = Some(wt_key);
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
         let _ = git::lock(&repo, &wt_path, Some("agent running"));
 
         // 5) 注册到 session 注册表(标记这是本工具建的)并持久化。
+        //    agent 字段记 None —— 用户后续通过 tab 栏按钮选择 agent,
+        //    建时不知会用哪个 agent(可能在一个 shell 里跑多个)。
         self.registry.register(
             &repo,
             Session {
                 path: wt_path.clone(),
                 branch: branch.clone(),
-                agent: Some(agent_name.to_string()),
+                agent: None,
                 created_at: session::now_secs(),
             },
         );
         self.persist_registry();
 
         self.refresh_worktrees();
-        self.set_status(format!("已在 {branch} 启动 {agent_name}"), false);
+        self.set_status(format!("已在 {branch} 开 shell"), false);
         cx.notify();
     }
 
     // ---------------- 关闭 worktree ----------------
 
-    /// 请求关闭:先停 agent + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
+    /// 请求关闭:先停所有 tab 的终端 + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
-        // 先停掉该终端的 agent(两段式)。用规范化 key 查。
-        if let Some(term) = self.terminals.get(&canon(&wt_path)) {
-            term.update(cx, |t, _| t.shutdown());
+        // 先停掉该 worktree 的所有 tab 终端(两段式)。用规范化 key 查。
+        if let Some(group) = self.terminals.get(&canon(&wt_path)) {
+            for tab in &group.tabs {
+                tab.terminal.update(cx, |t, _| t.shutdown());
+            }
         }
 
         // 检查未提交改动。
@@ -542,6 +577,121 @@ impl WorkspaceView {
         .detach();
     }
 
+    // ---------------- tab 操作(多终端 per worktree)----------------
+
+    /// 切换 active tab(点 tab 标题触发)。边界 clamp 防越界。
+    fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(key) = &self.active {
+            if let Some(group) = self.terminals.get_mut(key) {
+                if index < group.tabs.len() {
+                    group.active_tab = index;
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// 新建 shell tab(tab 栏 `+` 按钮触发)。在当前 active worktree 的 group 里
+    /// append 一个 shell tab;无 active 则 no-op。
+    fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.active.clone() else {
+            return;
+        };
+        let tab = self.spawn_shell_tab(&key, cx);
+        let group = self.terminals.entry(key).or_insert_with(|| TerminalGroup {
+            tabs: Vec::new(),
+            active_tab: 0,
+        });
+        group.tabs.push(tab);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    /// 关闭指定 tab(tab `✕` 按钮触发)。只停该终端,不删 worktree。
+    /// 关最后一个 tab 后 group 移除,终端区回到空态。
+    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(key) = self.active.clone() else {
+            return;
+        };
+        let Some(group) = self.terminals.get_mut(&key) else {
+            return;
+        };
+        if index >= group.tabs.len() {
+            return;
+        }
+        // 停 PTY(避免 leak-detection 误报)。
+        group.tabs[index].terminal.update(cx, |t, _| t.shutdown());
+        group.tabs.remove(index);
+        // 调整 active_tab:删的是 active 或之前的 → 回退;删之后的 → 不变。
+        if group.tabs.is_empty() {
+            // 最后一个 tab 关了 → 移除 group(worktree 仍在侧边栏)。
+            self.terminals.remove(&key);
+        } else if group.active_tab >= group.tabs.len() {
+            // 删的是最后一个 tab 且是 active → 回退到前一个。
+            group.active_tab = group.tabs.len() - 1;
+        } else if index < group.active_tab {
+            // 删的在 active 之前 → active 索引前移。
+            group.active_tab -= 1;
+        }
+        cx.notify();
+    }
+
+    /// 往当前 active tab 的 shell 发 agent 命令(tab 栏 agent 按钮触发)。
+    /// 构造 `command args\n` 写入 PTY,shell 在 worktree 目录里执行(已注入 env)。
+    /// 无 active / 无 tab 则 no-op。
+    fn send_agent_command(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.active.clone() else {
+            return;
+        };
+        let Some(group) = self.terminals.get(&key) else {
+            return;
+        };
+        let Some(tab) = group.tabs.get(group.active_tab) else {
+            return;
+        };
+        let terminal = tab.terminal.clone();
+
+        let Some(repo) = &self.repo else {
+            return;
+        };
+        let wt_env = HookContext {
+            worktree_path: key.clone(),
+            worktree_branch: String::new(),
+            worktree_name: key
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            repo_root: repo.clone(),
+        }
+        .env_vars();
+        let Some(spec) = AgentSpec::resolve(&self.config, agent_name, key.clone(), &wt_env) else {
+            self.set_status(format!("未知 agent:{agent_name}"), true);
+            return;
+        };
+        let cmd = Self::agent_command_string(&spec);
+        terminal.update(cx, |t, _| t.send_text(&cmd));
+    }
+
+    /// 构造 agent 启动命令字符串(写入 shell PTY):`command args\n`。
+    /// args 含空格 / 引号 / 空时用双引号包裹 + 转义。
+    fn agent_command_string(spec: &AgentSpec) -> String {
+        let mut s = spec.command.clone();
+        for arg in &spec.args {
+            s.push(' ');
+            if arg.contains(' ') || arg.contains('"') || arg.contains('\'') || arg.is_empty() {
+                s.push('"');
+                s.push_str(&arg.replace('\\', "\\\\").replace('"', "\\\""));
+                s.push('"');
+            } else {
+                s.push_str(arg);
+            }
+        }
+        // 用 \r(CR)模拟 Enter 键(input.rs: Key::Enter => b"\r"),
+        // 而非 \n —— PTY 行规范把 CR 当作提交命令的行终止符。
+        s.push('\r');
+        s
+    }
+
     // ---------------- 测试 accessor(仅测试构建可见)----------------
     // 集成测试(tests/)需观察状态机内部字段,但这些字段私有。以下 #[cfg(test)]
     // pub fn 不进生产二进制,API 表面不膨胀。生产代码不应调用。
@@ -570,12 +720,6 @@ impl WorkspaceView {
         self.worktrees.iter().map(|w| w.path.clone()).collect()
     }
 
-    /// agent 启动菜单是否展开。
-    #[cfg(feature = "test-support")]
-    pub fn is_agent_menu_open(&self) -> bool {
-        self.agent_menu_open
-    }
-
     /// 当前状态消息文本(None = 无状态)。
     #[cfg(feature = "test-support")]
     pub fn current_status(&self) -> Option<&str> {
@@ -600,10 +744,12 @@ impl WorkspaceView {
         self.pending_close.as_ref().map(|p| p.branch.as_str())
     }
 
-    /// 指定路径是否有活动终端。
+    /// 指定路径是否有终端组且 tabs 非空。
     #[cfg(feature = "test-support")]
     pub fn terminals_contains(&self, path: &std::path::Path) -> bool {
-        self.terminals.contains_key(&canon(path))
+        self.terminals
+            .get(&canon(path))
+            .is_some_and(|g| !g.tabs.is_empty())
     }
 
     /// 设置面板是否打开。
@@ -630,10 +776,31 @@ impl WorkspaceView {
         self.is_main_repo(path)
     }
 
-    /// 取某路径终端的引用(测试需读终端 snapshot/selection)。
+    /// 取某路径 active tab 的终端引用(测试需读终端 snapshot/selection)。
     #[cfg(feature = "test-support")]
     pub fn terminal_at(&self, path: &std::path::Path) -> Option<&Entity<TerminalView>> {
-        self.terminals.get(&canon(path))
+        self.terminals
+            .get(&canon(path))
+            .and_then(|g| g.tabs.get(g.active_tab))
+            .map(|t| &t.terminal)
+    }
+
+    /// 指定路径 group 的 tab 数(无 group → 0)。
+    #[cfg(feature = "test-support")]
+    pub fn tab_count(&self, path: &std::path::Path) -> usize {
+        self.terminals
+            .get(&canon(path))
+            .map(|g| g.tabs.len())
+            .unwrap_or(0)
+    }
+
+    /// active worktree 的 active_tab 索引(无 active / 无 group → None)。
+    #[cfg(feature = "test-support")]
+    pub fn active_tab_index(&self) -> Option<usize> {
+        self.active
+            .as_ref()
+            .and_then(|p| self.terminals.get(p))
+            .map(|g| g.active_tab)
     }
 
     /// 直接设置仓库(测试绕过 open_repo_picker 注入 temp repo)。
@@ -642,10 +809,10 @@ impl WorkspaceView {
         self.set_repo(repo);
     }
 
-    /// 直接触发 new_worktree_and_agent(测试绕过 UI 点击)。
+    /// 直接触发 new_worktree(测试绕过 UI 点击)。
     #[cfg(feature = "test-support")]
-    pub fn new_worktree_and_agent_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
-        self.new_worktree_and_agent(agent_name, cx);
+    pub fn new_worktree_for_test(&mut self, cx: &mut Context<Self>) {
+        self.new_worktree(cx);
     }
 
     /// 直接触发 request_close(测试绕过 UI 点击)。
@@ -671,18 +838,43 @@ impl WorkspaceView {
         self.cancel_close(cx);
     }
 
-    /// 直接打开 agent 菜单(测试绕过 UI 点击)。
+    /// 直接触发 new_terminal_tab(测试绕过 UI 点击)。
     #[cfg(feature = "test-support")]
-    pub fn open_agent_menu_for_test(&mut self, cx: &mut Context<Self>) {
-        self.agent_menu_open = true;
-        cx.notify();
+    pub fn new_terminal_tab_for_test(&mut self, cx: &mut Context<Self>) {
+        self.new_terminal_tab(cx);
+    }
+
+    /// 直接触发 close_tab(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn close_tab_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.close_tab(index, cx);
+    }
+
+    /// 直接触发 switch_tab(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn switch_tab_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.switch_tab(index, cx);
+    }
+
+    /// 直接触发 send_agent_command(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn send_agent_command_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        self.send_agent_command(agent_name, cx);
+    }
+
+    /// 直接触发 open_worktree(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn open_worktree_for_test(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
+        self.open_worktree(wt_path, cx);
     }
 
     /// 停掉所有终端(测试清理,避免 leak-detection 误报)。
     #[cfg(feature = "test-support")]
     pub fn shutdown_all_terminals_for_test(&mut self, cx: &mut Context<Self>) {
-        for term in self.terminals.values() {
-            term.update(cx, |t, _| t.shutdown());
+        for group in self.terminals.values() {
+            for tab in &group.tabs {
+                tab.terminal.update(cx, |t, _| t.shutdown());
+            }
         }
     }
 
@@ -701,14 +893,29 @@ impl Focusable for WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 终端区(填满上方)。
+        // 终端区:active worktree 的 active tab 终端;无则空态文字。
         let term_area: gpui::AnyElement =
             match self.active.as_ref().and_then(|p| self.terminals.get(p)) {
-                Some(term) => div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(term.clone())
-                    .into_any_element(),
+                Some(group) => {
+                    if let Some(tab) = group.tabs.get(group.active_tab) {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(tab.terminal.clone())
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(theme::BG))
+                            .text_color(rgb(theme::TEXT_FAINT))
+                            .child(SharedString::from("select an action to begin"))
+                            .into_any_element()
+                    }
+                }
                 None => div()
                     .flex_1()
                     .min_h_0()
@@ -721,12 +928,13 @@ impl Render for WorkspaceView {
                     .into_any_element(),
             };
 
-        // 主列:终端区 + 底部状态栏。
+        // 主列:tab 栏 + 终端区 + 底部状态栏。
         let main = div()
             .flex_1()
             .h_full()
             .flex()
             .flex_col()
+            .child(self.tab_bar(cx))
             .child(term_area)
             .child(self.status_bar());
 
@@ -770,13 +978,6 @@ impl Render for WorkspaceView {
                     }
                 }),
             )
-            // 菜单展开时 Esc 关闭(与遮罩点击关菜单互补)。
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
-                if this.agent_menu_open && ev.keystroke.key == "escape" {
-                    this.agent_menu_open = false;
-                    cx.notify();
-                }
-            }))
             .child(self.sidebar(cx))
             .child(splitter)
             .child(main);
@@ -792,10 +993,6 @@ impl Render for WorkspaceView {
         // 设置面板打开中 → 叠加设置弹窗。
         if self.settings.is_some() {
             root = root.child(self.settings_dialog(cx));
-        }
-        // agent 启动菜单展开 → 叠加下拉菜单(遮罩 + 卡片)。
-        if self.agent_menu_open {
-            root = root.child(self.agent_menu(cx));
         }
 
         root

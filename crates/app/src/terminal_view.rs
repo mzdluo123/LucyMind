@@ -46,6 +46,9 @@ pub struct TerminalView {
     /// 最近一次快照(每帧从 session 取新的)。
     snapshot: RenderSnapshot,
     exited: Option<i32>,
+    /// 终端动态标题(OSC 0/2 协议,`\x1b]0;<title>\x07`)。None = 未收到,
+    /// tab 栏渲染时回退到静态标题("Shell")。
+    title: Option<String>,
 
     // ---- 鼠标框选状态 ----
     /// 选区(起点 cell, 终点 cell);None = 无选区。终点随拖动更新。
@@ -98,7 +101,11 @@ impl TerminalView {
                         let mut dirty = false;
                         for ev in events {
                             match ev {
-                                TermEvent::Wakeup | TermEvent::Title(_) | TermEvent::Bell => {
+                                TermEvent::Wakeup | TermEvent::Bell => {
+                                    dirty = true;
+                                }
+                                TermEvent::Title(t) => {
+                                    view.title = Some(t);
                                     dirty = true;
                                 }
                                 TermEvent::ChildExit(code) => {
@@ -133,6 +140,7 @@ impl TerminalView {
             focus: cx.focus_handle(),
             snapshot,
             exited: None,
+            title: None,
             selection: None,
             is_selecting: false,
             dragging_scrollbar: false,
@@ -152,14 +160,32 @@ impl TerminalView {
         self.session.shutdown();
     }
 
+    /// 终端动态标题(OSC 0/2 协议)。None = 未收到,调用方应回退到静态标题。
+    /// tab 栏渲染用此优先显示动态标题(如 shell 当前目录 / agent 名)。
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// 向 PTY 写入文本字节(供 agent 按钮发命令、快捷键发命令等)。
+    /// 内部调 `session.write_input`,不等待 shell 处理。
+    pub fn send_text(&self, text: &str) {
+        self.session.write_input(text.as_bytes().to_vec());
+    }
+
     // ---------------- 测试 accessor(仅测试构建可见)----------------
     // 集成测试(tests/)需观察内部状态(snapshot/选区/exit/dimensions),但字段私有。
     // 这些 #[cfg(test)] pub fn 不进生产二进制,API 表面不膨胀。
 
     /// 当前可渲染快照的文本(按行拼接,width==0 的宽字符占位跳过)。
+    ///
+    /// 测试时直接从 live `session.snapshot()` 读取,而非缓存的 `self.snapshot`。
+    /// 缓存仅由 16ms 轮询循环更新(GPUI timer),TestAppContext 的 mock 时钟不推进,
+    /// 轮询循环不会触发;`maybe_resize`(paint 时调用)仅在尺寸变化时刷新缓存。
+    /// 读 live snapshot 确保 PTY reader 线程(OS 线程,不受 mock 时钟影响)
+    /// 写入 Term 的内容能被测试立即读到。
     #[cfg(feature = "test-support")]
     pub fn snapshot_text(&self) -> String {
-        let snap = &self.snapshot;
+        let snap = self.session.snapshot();
         let mut s = String::new();
         for line in 0..snap.rows {
             for col in 0..snap.cols {
@@ -171,6 +197,31 @@ impl TerminalView {
             s.push('\n');
         }
         s
+    }
+
+    /// 手动排空 PTY 事件队列(模拟 16ms 轮询循环)。
+    ///
+    /// TestAppContext 的 mock 时钟不推进 `background_executor().timer(16ms)`,
+    /// 轮询循环不会触发。测试需要手动调此方法排空 `drain_events()` 返回的事件
+    /// (Wakeup / Title / ChildExit),更新 `title` / `exited` / `snapshot`。
+    #[cfg(feature = "test-support")]
+    pub fn poll_events_for_test(&mut self) {
+        let events = self.session.drain_events();
+        for ev in events {
+            match ev {
+                TermEvent::Wakeup | TermEvent::Bell => {
+                    self.snapshot = self.session.snapshot();
+                }
+                TermEvent::Title(t) => {
+                    self.title = Some(t);
+                    self.snapshot = self.session.snapshot();
+                }
+                TermEvent::ChildExit(code) => {
+                    self.exited = Some(code);
+                    self.snapshot = self.session.snapshot();
+                }
+            }
+        }
     }
 
     /// 子进程是否已退出(及退出码)。测试断言 agent/shell 结束。

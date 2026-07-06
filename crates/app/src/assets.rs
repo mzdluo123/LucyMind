@@ -18,6 +18,7 @@ const FOLDER_GIT_SVG: &[u8] = include_bytes!("../assets/icons/folder-git-2.svg")
 const GIT_BRANCH_SVG: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
 const SETTINGS_SVG: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const PLUS_SVG: &[u8] = include_bytes!("../assets/icons/plus.svg");
+const FOLDER_OPEN_SVG: &[u8] = include_bytes!("../assets/icons/folder-open.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -33,6 +34,7 @@ impl AssetSource for Assets {
             "icons/git-branch.svg" => Some(GIT_BRANCH_SVG),
             "icons/settings.svg" => Some(SETTINGS_SVG),
             "icons/plus.svg" => Some(PLUS_SVG),
+            "icons/folder-open.svg" => Some(FOLDER_OPEN_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -48,6 +50,7 @@ impl AssetSource for Assets {
             SharedString::from("icons/git-branch.svg"),
             SharedString::from("icons/settings.svg"),
             SharedString::from("icons/plus.svg"),
+            SharedString::from("icons/folder-open.svg"),
         ])
     }
 }

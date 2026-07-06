@@ -15,7 +15,7 @@ fn create_worktree(
     _repo: &std::path::Path,
 ) -> std::path::PathBuf {
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_worktree_and_agent_for_test("test", cx));
+        workspace.update(cx, |v, cx| v.new_worktree_for_test(cx));
     });
     wait_for(
         cx,

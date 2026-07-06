@@ -1,13 +1,11 @@
 //! 侧边栏面板:标题区 + 仓库行 + Agents 动作区 + WORKTREES 列表。
 //!
 //! 作为 [`WorkspaceView`](super::WorkspaceView) 的 `impl` 方法(跨文件 impl),
-//! 直接访问其状态。可复用的按钮走 [`crate::ui::button`],样式 token 走
-//! [`crate::theme`]。
+//! 直接访问其状态。样式 token 走 [`crate::theme`]。
 
 use gpui::{div, prelude::*, rgb, Context, IntoElement, ParentElement, SharedString, Styled};
 
 use crate::theme;
-use crate::ui::button;
 
 use super::WorkspaceView;
 
@@ -43,7 +41,7 @@ impl WorkspaceView {
                 ),
         );
 
-        // 仓库行:当前仓库名 + Open 按钮(切换/打开仓库)。
+        // 仓库行:当前仓库名 + folder-open 图标按钮(切换/打开仓库)。
         let repo_label = match &self.repo {
             Some(r) => r
                 .file_name()
@@ -70,15 +68,30 @@ impl WorkspaceView {
                         .child(SharedString::from(repo_label)),
                 )
                 .child(
-                    button("open-repo", "Open…").on_click(cx.listener(|this, _ev, _w, cx| {
-                        this.open_repo_picker(cx);
-                    })),
+                    // folder-open 图标按钮:与齿轮 / `+` 同风格(无背景无描边 +
+                    // group-hover 染色)。比文字按钮更紧凑、更编辑器风。
+                    div()
+                        .id("open-repo")
+                        .group("open-repo-btn")
+                        .flex_none()
+                        .px(theme::space_xs())
+                        .cursor_pointer()
+                        .child(
+                            gpui::svg()
+                                .size(gpui::px(14.0))
+                                .path("icons/folder-open.svg")
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .group_hover("open-repo-btn", |s| s.text_color(rgb(theme::TEXT))),
+                        )
+                        .on_click(cx.listener(|this, _ev, _w, cx| {
+                            this.open_repo_picker(cx);
+                        })),
                 ),
         );
 
         // 区域标签:Agents —— 标题行(label 左 + `+` 按钮右),与 WORKTREES
-        // 标题行(齿轮按钮)结构对称。点 `+` 弹下拉菜单列出 builtin agent
-        // (迭代 [`lucy_core::agent::builtin_agents`],不在此硬编码)。
+        // 标题行(齿轮按钮)结构对称。点 `+` 直接建 worktree + 开 shell(不弹菜单;
+        // agent 启动移到 tab 栏按钮,往 shell 发命令)。
         list = list.child(
             div()
                 .mb(theme::space_sm())
@@ -109,8 +122,7 @@ impl WorkspaceView {
                                 }),
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.agent_menu_open = true;
-                            cx.notify();
+                            this.new_worktree(cx);
                         })),
                 ),
         );
@@ -182,89 +194,6 @@ impl WorkspaceView {
                     .p(theme::space_lg())
                     .child(list),
             )
-    }
-
-    /// agent 启动下拉菜单(`+` 按钮触发):全屏遮罩 + 贴左上的卡片,列出
-    /// [`lucy_core::agent::builtin_agents`] 全部 agent。点遮罩 / Esc / 选中项均关。
-    /// 选中项走 [`new_worktree_and_agent`](super::WorkspaceView::new_worktree_and_agent)。
-    ///
-    /// 卡片不精确锚定 `+` 按钮像素,固定贴窗口左上(大致在 AGENTS 标题下方),
-    /// 实现简单且侧边栏宽度内足够(见 design.md D2)。
-    pub(super) fn agent_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 遮罩:压暗背景,点空白处关菜单(卡片 stop_propagation 防误关)。
-        // 卡片作为遮罩的子元素,靠 items_start + padding 贴左上。
-        let mut menu = div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_start()
-            // 大致在 AGENTS 标题行 `+` 按钮下方(标题区 + 仓库行 + AGENTS 行)。
-            .pt(gpui::px(132.0))
-            .pl(theme::space_lg())
-            .bg(theme::with_alpha(0x00_00_00, 0.55))
-            .font_family(theme::FONT_UI)
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.agent_menu_open = false;
-                    cx.notify();
-                }),
-            );
-
-        // 卡片内的 agent 列表(迭代注册表,不硬编码)。
-        let mut list = div().flex().flex_col().gap(theme::space_xs());
-        for a in lucy_core::agent::builtin_agents() {
-            let name = a.name.to_string();
-            // 图标走 agent_icon(查注册表),与旧侧边栏按钮同源。
-            let icon = crate::assets::agent_icon(a.name);
-            let mut row = div()
-                .id(SharedString::from(format!("agent-menu-{}", a.name)))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(theme::space_sm())
-                .px(theme::space_md())
-                .py(theme::space_sm())
-                .min_w(gpui::px(180.0))
-                .cursor_pointer()
-                .text_color(rgb(theme::TEXT))
-                .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
-            if let Some(path) = icon {
-                row = row.child(
-                    gpui::svg()
-                        .flex_none()
-                        .size(gpui::px(16.0))
-                        .path(path)
-                        .text_color(rgb(theme::TEXT)),
-                );
-            }
-            row = row
-                .child(SharedString::from(a.display))
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.agent_menu_open = false;
-                    this.new_worktree_and_agent(&name, cx);
-                }));
-            list = list.child(row);
-        }
-
-        // 卡片:描边 + 2px 圆角(与 modal/dialog 同语言)。stop_propagation
-        // 让点卡片内(项间空白)不冒泡到遮罩关菜单。
-        let card = div()
-            .bg(rgb(theme::SURFACE))
-            .border_1()
-            .border_color(rgb(theme::BORDER))
-            .rounded(theme::radius())
-            .p(theme::space_xs())
-            .child(list)
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|_this, _ev, _w, cx| {
-                    cx.stop_propagation();
-                }),
-            );
-
-        menu = menu.child(card);
-        menu
     }
 
     /// 单条 worktree 行:标记条 + 图标 + 名字 + ✎ 改别名 + ✕ 关闭。
