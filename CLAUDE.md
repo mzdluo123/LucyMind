@@ -54,6 +54,11 @@ cargo test -p lucy-app --test new_worktree # 单个文件
   `WorkspaceView::new_for_test`(不弹 prompt)+ `set_repo_for_test` 注入仓库。
 - registry 持久化路径用 `set_registry_path_for_test` 隔离到 tempdir,避免污染真实用户 session。
 - **新增 UI 功能改动必须伴随 `#[gpui::test]`** —— `cargo test -p lucy-app` 是 UI 行为的自动化验证门禁。
+- **OpenSpec 变更的 tasks.md 必须包含测试任务** —— 每个变更的 tasks 要有独立的测试任务组,覆盖三类:
+  - **单元测试**(`#[test]`,在 `mod tests`):纯逻辑函数(命令构造、枚举映射、路径规范化等),无 PTY / 无 GPUI context,快且确定;
+  - **UI 状态测试**(`#[gpui::test]`):用 accessor(`*_for_test`)验证状态机(open/close/no-op/edge case),不依赖像素渲染;
+  - **集成测试**(`#[gpui::test]`):用 `wait_for` 轮询 PTY 输出 / 端到端流程(shell 启动、agent 命令发送、tab CRUD 跨 worktree)。
+  测试任务要在实现任务之后、质量门之前,且每个测试任务标注测什么(不只写「加测试」)。
 
 ## 架构：三层 crate，依赖单向向下
 

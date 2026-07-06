@@ -20,8 +20,8 @@ mod tabs;
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
-    Render, SharedString, Styled, Window,
+    div, prelude::*, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, Styled, Window,
 };
 
 use lucy_core::agent::AgentSpec;
@@ -113,11 +113,56 @@ struct SettingsForm {
     copy_files: gpui::Entity<gpui_component::input::InputState>,
 }
 
+/// 用户可选的 shell 类型(launcher menu 的 New Tab 组)。
+///
+/// `Default` 用系统默认 shell(alacritty tty 层决定);Windows 上可选
+/// cmd / PowerShell / PowerShell 7。非 Windows 只有 `Default`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    Default,
+    #[cfg(windows)]
+    Cmd,
+    #[cfg(windows)]
+    PowerShell,
+    #[cfg(windows)]
+    Pwsh,
+}
+
+impl ShellKind {
+    /// 转成 `TerminalView::new` 的 `command` 参数。
+    /// `None` = 系统默认 shell;`Some((program, args))` = 指定程序。
+    fn command(&self) -> Option<(String, Vec<String>)> {
+        match self {
+            ShellKind::Default => None,
+            #[cfg(windows)]
+            ShellKind::Cmd => Some(("cmd.exe".into(), vec![])),
+            #[cfg(windows)]
+            ShellKind::PowerShell => Some(("powershell.exe".into(), vec![])),
+            #[cfg(windows)]
+            ShellKind::Pwsh => Some(("pwsh.exe".into(), vec![])),
+        }
+    }
+
+    /// tab 标题回退(终端未发 OSC 0/2 时显示)。
+    fn label(&self) -> &'static str {
+        match self {
+            ShellKind::Default => "Shell",
+            #[cfg(windows)]
+            ShellKind::Cmd => "cmd",
+            #[cfg(windows)]
+            ShellKind::PowerShell => "PowerShell",
+            #[cfg(windows)]
+            ShellKind::Pwsh => "pwsh",
+        }
+    }
+}
+
 /// 一个终端 tab(终端 Entity + 静态回退标题)。
 ///
-/// 静态标题在创建时确定(所有 tab 都是 "Shell"),作为 tab 栏显示的回退。
-/// 终端可能通过 OSC 0/2 协议发动态标题(`\x1b]0;<title>\x07`),tab 栏渲染时
-/// 优先取 `terminal.title()`,无动态标题时回退到此静态标题。
+/// 静态标题在创建时由 `ShellKind::label()` 确定(Default → "Shell"、
+/// Cmd → "cmd" 等),作为 tab 栏显示的回退。终端可能通过 OSC 0/2 协议
+/// 发动态标题(`\x1b]0;<title>\x07`),tab 栏渲染时优先取 `terminal.title()`,
+/// 无动态标题时回退到此静态标题。
 struct TerminalTab {
     terminal: Entity<TerminalView>,
     /// 静态回退标题(终端未发 OSC 0/2 时显示)。
@@ -157,6 +202,8 @@ pub struct WorkspaceView {
     alias_input: Option<gpui::Entity<gpui_component::input::InputState>>,
     /// 设置面板表单(Some = 设置弹窗打开中)。见 [`SettingsForm`]。
     settings: Option<SettingsForm>,
+    /// launcher 菜单(`+` 按钮下拉)是否打开。
+    launcher_menu_open: bool,
     focus: FocusHandle,
     /// 测试用:覆盖 registry 持久化路径(None = 用默认路径 `~/Library/...`)。
     /// 测试设为 tempdir,避免污染真实用户的 session 注册表。
@@ -216,6 +263,7 @@ impl WorkspaceView {
             editing_alias: None,
             alias_input: None,
             settings: None,
+            launcher_menu_open: false,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
             registry_path: None,
@@ -279,7 +327,7 @@ impl WorkspaceView {
         let wt_path = canon(&wt_path);
         if !self.terminals.contains_key(&wt_path) {
             // 没有终端组(存量 worktree)→ 起一个默认 shell tab。
-            let tab = self.spawn_shell_tab(&wt_path, cx);
+            let tab = self.spawn_shell_tab(&wt_path, ShellKind::Default, cx);
             self.terminals.insert(
                 wt_path.clone(),
                 TerminalGroup {
@@ -292,10 +340,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// 起一个默认 shell 终端 tab(cwd = worktree 路径,注入 TERM + worktree env)。
+    /// 起一个 shell 终端 tab(cwd = worktree 路径,注入 TERM + worktree env)。
+    /// `shell` 决定启动哪个 shell(Default = 系统默认;Cmd/PowerShell/Pwsh = 指定程序)。
     /// 供 `open_worktree`(无 group 时建首个 tab)、`new_worktree`(侧边栏 `+` 建
     /// worktree 后开首个 tab)、`new_terminal_tab`(tab 栏 `+` 新建 tab)复用。
-    fn spawn_shell_tab(&self, wt_path: &std::path::Path, cx: &mut Context<Self>) -> TerminalTab {
+    fn spawn_shell_tab(
+        &self,
+        wt_path: &std::path::Path,
+        shell: ShellKind,
+        cx: &mut Context<Self>,
+    ) -> TerminalTab {
         let wt_env = HookContext {
             worktree_path: wt_path.to_path_buf(),
             worktree_branch: String::new(),
@@ -312,12 +366,13 @@ impl WorkspaceView {
                 .collect();
 
         let cwd = wt_path.to_path_buf();
+        let command = shell.command();
         let terminal = cx.new(|cx| {
-            TerminalView::new(cx, Some(cwd), None, env).expect("failed to start shell terminal")
+            TerminalView::new(cx, Some(cwd), command, env).expect("failed to start shell terminal")
         });
         TerminalTab {
             terminal,
-            title: "Shell".to_string(),
+            title: shell.label().to_string(),
         }
     }
 
@@ -418,7 +473,7 @@ impl WorkspaceView {
 
         // 3) 开 shell 终端 tab(不自动起 agent;用户通过 tab 栏 agent 按钮发命令)。
         let wt_key = canon(&wt_path);
-        let tab = self.spawn_shell_tab(&wt_key, cx);
+        let tab = self.spawn_shell_tab(&wt_key, ShellKind::Default, cx);
         self.terminals.insert(
             wt_key.clone(),
             TerminalGroup {
@@ -591,13 +646,13 @@ impl WorkspaceView {
         }
     }
 
-    /// 新建 shell tab(tab 栏 `+` 按钮触发)。在当前 active worktree 的 group 里
-    /// append 一个 shell tab;无 active 则 no-op。
-    fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
+    /// 新建 shell tab(tab 栏 `+` 按钮 / launcher menu 触发)。在当前 active
+    /// worktree 的 group 里 append 一个指定 shell 类型的 tab;无 active 则 no-op。
+    fn new_terminal_tab(&mut self, shell: ShellKind, cx: &mut Context<Self>) {
         let Some(key) = self.active.clone() else {
             return;
         };
-        let tab = self.spawn_shell_tab(&key, cx);
+        let tab = self.spawn_shell_tab(&key, shell, cx);
         let group = self.terminals.entry(key).or_insert_with(|| TerminalGroup {
             tabs: Vec::new(),
             active_tab: 0,
@@ -605,6 +660,29 @@ impl WorkspaceView {
         group.tabs.push(tab);
         group.active_tab = group.tabs.len() - 1;
         cx.notify();
+    }
+
+    /// 启动 agent:创建新 shell tab(Default)+ 立即往新 tab 发 agent 命令。
+    /// 每个 agent 独立 tab,可并行运行。launcher menu 的 "Launch Agent" 项触发。
+    fn launch_agent(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        self.new_terminal_tab(ShellKind::Default, cx);
+        self.send_agent_command(agent_name, cx);
+    }
+
+    /// 在系统文件管理器中打开 active worktree 目录。
+    /// macOS: `open`、Windows: `explorer`、Linux: `xdg-open`。
+    /// 用 `spawn()`(非 `status()`),不阻塞 UI 线程。无 active 时 no-op。
+    fn reveal_in_file_manager(&self, _cx: &mut Context<Self>) {
+        let Some(path) = &self.active else {
+            return;
+        };
+        let path = path.clone();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(&path).spawn();
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("explorer").arg(&path).spawn();
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
     }
 
     /// 关闭指定 tab(tab `✕` 按钮触发)。只停该终端,不删 worktree。
@@ -840,8 +918,8 @@ impl WorkspaceView {
 
     /// 直接触发 new_terminal_tab(测试绕过 UI 点击)。
     #[cfg(feature = "test-support")]
-    pub fn new_terminal_tab_for_test(&mut self, cx: &mut Context<Self>) {
-        self.new_terminal_tab(cx);
+    pub fn new_terminal_tab_for_test(&mut self, shell: ShellKind, cx: &mut Context<Self>) {
+        self.new_terminal_tab(shell, cx);
     }
 
     /// 直接触发 close_tab(测试绕过 UI 点击)。
@@ -860,6 +938,42 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn send_agent_command_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
         self.send_agent_command(agent_name, cx);
+    }
+
+    /// 直接触发 launch_agent(测试绕过 UI 点击)。
+    /// = `new_terminal_tab(Default)` + `send_agent_command(name)`。
+    #[cfg(feature = "test-support")]
+    pub fn launch_agent_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        self.launch_agent(agent_name, cx);
+    }
+
+    /// 直接触发 reveal_in_file_manager(测试绕过 UI 点击)。
+    /// 无 active 时 no-op;有 active 时 spawn 系统命令(不阻塞)。
+    #[cfg(feature = "test-support")]
+    pub fn reveal_in_file_manager_for_test(&self, cx: &mut Context<Self>) {
+        self.reveal_in_file_manager(cx);
+    }
+
+    /// 读 launcher 菜单是否打开。
+    #[cfg(feature = "test-support")]
+    pub fn launcher_menu_open_for_test(&self) -> bool {
+        self.launcher_menu_open
+    }
+
+    /// 设置 launcher 菜单打开状态(测试模拟 `+` 按钮点击)。
+    #[cfg(feature = "test-support")]
+    pub fn set_launcher_menu_open_for_test(&mut self, open: bool) {
+        self.launcher_menu_open = open;
+    }
+
+    /// 取指定路径 active tab 的静态回退标题(`TerminalTab.title`)。
+    /// 用于验证 `ShellKind::label()` 生效(Default → "Shell"、Cmd → "cmd" 等)。
+    #[cfg(feature = "test-support")]
+    pub fn tab_title_for_test(&self, path: &std::path::Path) -> Option<String> {
+        self.terminals
+            .get(&canon(path))
+            .and_then(|g| g.tabs.get(g.active_tab))
+            .map(|t| t.title.clone())
     }
 
     /// 直接触发 open_worktree(测试绕过 UI 点击)。
@@ -929,8 +1043,11 @@ impl Render for WorkspaceView {
             };
 
         // 主列:tab 栏 + 终端区 + 底部状态栏。
+        // min_w_0: 允许 main 在 root flex_row 中收缩到 sidebar+splitter 之外的剩余宽度,
+        //   不因 tab_bar 内容撑宽而把 splitter/侧栏挤出窗口。
         let main = div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .flex_col()
@@ -978,6 +1095,13 @@ impl Render for WorkspaceView {
                     }
                 }),
             )
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
+                if this.launcher_menu_open && ev.keystroke.key == "escape" {
+                    this.launcher_menu_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.sidebar(cx))
             .child(splitter)
             .child(main);
@@ -993,6 +1117,10 @@ impl Render for WorkspaceView {
         // 设置面板打开中 → 叠加设置弹窗。
         if self.settings.is_some() {
             root = root.child(self.settings_dialog(cx));
+        }
+        // launcher 菜单(`+` 按钮下拉)打开中 → 叠加菜单 overlay。
+        if self.launcher_menu_open {
+            root = root.child(self.launcher_menu(cx));
         }
 
         root
@@ -1132,5 +1260,81 @@ mod tests {
         // 无参数:只有 command + \r。
         let s = WorkspaceView::agent_command_string(&spec("claude", &[]));
         assert_eq!(s, "claude\r");
+    }
+
+    // ---- ShellKind 枚举映射测试 ----
+
+    #[test]
+    fn shell_kind_default_command_is_none() {
+        // Default 用系统默认 shell(command = None),交由 alacritty tty 层决定。
+        assert!(ShellKind::Default.command().is_none());
+    }
+
+    #[test]
+    fn shell_kind_default_label() {
+        assert_eq!(ShellKind::Default.label(), "Shell");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_cmd_command() {
+        let (program, args) = ShellKind::Cmd.command().expect("Cmd should have command");
+        assert_eq!(program, "cmd.exe");
+        assert!(args.is_empty(), "Cmd args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_cmd_label() {
+        assert_eq!(ShellKind::Cmd.label(), "cmd");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_powershell_command() {
+        let (program, args) = ShellKind::PowerShell
+            .command()
+            .expect("PowerShell should have command");
+        assert_eq!(program, "powershell.exe");
+        assert!(args.is_empty(), "PowerShell args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_powershell_label() {
+        assert_eq!(ShellKind::PowerShell.label(), "PowerShell");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_pwsh_command() {
+        let (program, args) = ShellKind::Pwsh.command().expect("Pwsh should have command");
+        assert_eq!(program, "pwsh.exe");
+        assert!(args.is_empty(), "Pwsh args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_pwsh_label() {
+        assert_eq!(ShellKind::Pwsh.label(), "pwsh");
+    }
+
+    #[test]
+    fn shell_kind_all_variants_covered() {
+        // 穷举所有变体,确保 command() 和 label() 都不 panic。
+        // 防新增变体漏实现 match 分支(编译器会报 non-exhaustive,但运行时也验证)。
+        let variants: &[ShellKind] = &[
+            ShellKind::Default,
+            #[cfg(windows)]
+            ShellKind::Cmd,
+            #[cfg(windows)]
+            ShellKind::PowerShell,
+            #[cfg(windows)]
+            ShellKind::Pwsh,
+        ];
+        for v in variants {
+            let _ = v.command();
+            let _ = v.label();
+        }
     }
 }

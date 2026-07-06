@@ -5,6 +5,7 @@ use std::time::Duration;
 use gpui::TestAppContext;
 
 use common::{build_workspace, shutdown_workspace, temp_repo, temp_repo_with_agent, wait_for};
+use lucy_app::workspace::ShellKind;
 
 mod common;
 
@@ -62,7 +63,9 @@ async fn new_tab_increments_tab_count(cx: &mut TestAppContext) {
 
     // 新建第二个 tab。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
 
@@ -90,7 +93,9 @@ async fn switch_tab_preserves_terminal(cx: &mut TestAppContext) {
 
     // 建第二个 tab(active=1)。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
 
@@ -154,7 +159,9 @@ async fn close_non_active_tab(cx: &mut TestAppContext) {
 
     // 建第二个 tab(active=1)。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
     let term_idx1 = cx.read(|cx| {
@@ -206,7 +213,9 @@ async fn close_active_tab_falls_back(cx: &mut TestAppContext) {
 
     // 建第二个 tab(active=1)。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
 
@@ -328,7 +337,9 @@ async fn switch_worktree_preserves_active_tab(cx: &mut TestAppContext) {
     // 建 worktree A → 2 tab(active=1)。
     let wt_a = create_worktree(cx, &workspace);
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
     assert_eq!(
@@ -499,7 +510,9 @@ async fn switch_tab_out_of_bounds_is_noop(cx: &mut TestAppContext) {
 
     // 建第二个 tab(active=1)。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
 
@@ -547,7 +560,9 @@ async fn new_terminal_tab_noop_without_active(cx: &mut TestAppContext) {
 
     // 无 active worktree → new_terminal_tab 应 no-op,不 panic。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
     assert!(
@@ -650,7 +665,9 @@ async fn close_tab_then_new_tab_recreates_group(cx: &mut TestAppContext) {
 
     // new_terminal_tab 应重新创建 group(active 仍是 wt_path)。
     cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.new_terminal_tab_for_test(cx));
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
     });
     cx.run_until_parked();
     assert!(
@@ -661,6 +678,701 @@ async fn close_tab_then_new_tab_recreates_group(cx: &mut TestAppContext) {
         cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
         1,
         "should have 1 tab after recreating group"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+// ---- 10. UI 状态测试:launcher menu + ShellKind + launch_agent ----
+
+#[gpui::test]
+async fn launcher_menu_closed_by_default(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    assert!(
+        !cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "launcher menu should be closed by default"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn launcher_menu_open_close(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(true));
+    });
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should be open after set true"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(false));
+    });
+    assert!(
+        !cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should be closed after set false"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_terminal_tab_default_shell(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "initial tab count should be 1"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        2,
+        "tab count should be 2"
+    );
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(1),
+        "active tab should be 1 (newly created)"
+    );
+
+    let title = cx.read(|cx| workspace.read(cx).tab_title_for_test(&wt_path));
+    assert_eq!(title.as_deref(), Some("Shell"), "default shell title");
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_terminal_tab_multiple_shells(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    for i in 0..3 {
+        cx.update(|cx| {
+            workspace.update(cx, |v, cx| {
+                v.new_terminal_tab_for_test(ShellKind::Default, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+            2 + i,
+            "tab count after {} new tabs",
+            i + 1
+        );
+    }
+
+    assert!(
+        cx.read(|cx| { workspace.read(cx).terminal_at(&wt_path).is_some() }),
+        "active terminal should exist"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_terminal_tab_noop_without_active_shell(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).active_tab_index())
+            .is_none(),
+        "no tab should exist without active worktree"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn launch_agent_creates_new_tab(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+    let initial_count = cx.read(|cx| workspace.read(cx).tab_count(&wt_path));
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        initial_count + 1,
+        "launch_agent should create a new tab"
+    );
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(initial_count),
+        "active tab should be the newly created one"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn launch_agent_unknown_sets_error(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+    let initial_count = cx.read(|cx| workspace.read(cx).tab_count(&wt_path));
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("nonexistent", cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        initial_count + 1,
+        "tab should be created even for unknown agent"
+    );
+    assert!(
+        cx.read(|cx| workspace.read(cx).status_is_error()),
+        "should set error status for unknown agent"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn launch_agent_noop_without_active(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).active_tab_index())
+            .is_none(),
+        "no tab should exist without active worktree"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn multiple_launch_agent_creates_separate_tabs(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+    let initial_count = cx.read(|cx| workspace.read(cx).tab_count(&wt_path));
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+    cx.run_until_parked();
+    let id1 = cx.read(|cx| {
+        workspace
+            .read(cx)
+            .terminal_at(&wt_path)
+            .map(|t| t.entity_id())
+    });
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+    cx.run_until_parked();
+    let id2 = cx.read(|cx| {
+        workspace
+            .read(cx)
+            .terminal_at(&wt_path)
+            .map(|t| t.entity_id())
+    });
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        initial_count + 2,
+        "should have 2 new tabs from 2 launch_agent calls"
+    );
+    assert_ne!(id1, id2, "each launch_agent should create a separate tab");
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn close_tab_after_launch_agent(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+    let initial_count = cx.read(|cx| workspace.read(cx).tab_count(&wt_path));
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        initial_count + 1,
+    );
+
+    let active = cx.read(|cx| workspace.read(cx).active_tab_index()).unwrap();
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(active, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        initial_count,
+        "tab count should decrease after close"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn switch_worktree_does_not_affect_launcher_menu(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_a = create_worktree(cx, &workspace);
+    let wt_b = create_worktree(cx, &workspace);
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(true));
+    });
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(wt_b.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should stay open after switching worktree"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(wt_a.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should stay open after switching back"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn close_last_tab_does_not_crash_launcher(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(true));
+    });
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(0, cx));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu state should survive close_last_tab"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "group should be recreated"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+// ---- 11. 集成测试:ShellKind + launch_agent 端到端 ----
+
+#[gpui::test]
+async fn shell_kind_default_spawns_shell(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let term = cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()));
+    if let Some(term) = term {
+        cx.update(|cx| {
+            term.update(cx, |t, _| t.send_text("echo MARKER_SHELL\r"));
+        });
+    }
+
+    wait_for(
+        cx,
+        |cx| {
+            let term =
+                cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()));
+            term.is_some_and(|t| {
+                cx.update(|cx| t.update(cx, |tv, _| tv.poll_events_for_test()));
+                cx.read(|cx| t.read(cx).snapshot_text().contains("MARKER_SHELL"))
+            })
+        },
+        Duration::from_secs(15),
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn shell_kind_label_as_fallback_title(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    let title = cx.read(|cx| workspace.read(cx).tab_title_for_test(&wt_path));
+    assert_eq!(title.as_deref(), Some("Shell"), "Default shell label");
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| {
+            v.new_terminal_tab_for_test(ShellKind::Default, cx)
+        });
+    });
+    cx.run_until_parked();
+
+    let title = cx.read(|cx| workspace.read(cx).tab_title_for_test(&wt_path));
+    assert_eq!(
+        title.as_deref(),
+        Some("Shell"),
+        "Default shell label on new tab"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn tab_flex_shrink_many_tabs(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    for _ in 0..9 {
+        cx.update(|cx| {
+            workspace.update(cx, |v, cx| {
+                v.new_terminal_tab_for_test(ShellKind::Default, cx)
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        10,
+        "should have 10 tabs"
+    );
+
+    let mut ids = Vec::new();
+    for i in 0..10 {
+        cx.update(|cx| {
+            workspace.update(cx, |v, cx| v.switch_tab_for_test(i, cx));
+        });
+        cx.run_until_parked();
+        let id = cx.read(|cx| {
+            workspace
+                .read(cx)
+                .terminal_at(&wt_path)
+                .map(|t| t.entity_id())
+        });
+        assert!(id.is_some(), "tab {i} should have a terminal");
+        ids.push(id.unwrap());
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 10, "all 10 terminals should be distinct");
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn launch_agent_sends_command_to_new_tab(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let toml = if cfg!(windows) {
+        "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\n\
+         [agents.test]\ncommand = \"cmd.exe\"\nargs = [\"/c\", \"echo MARKER_READY\"]\n"
+    } else {
+        "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\n\
+         [agents.test]\ncommand = \"sh\"\nargs = [\"-c\", \"printf MARKER_READY\"]\n"
+    };
+    std::fs::write(repo.join(".worktree.toml"), toml).unwrap();
+
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.launch_agent_for_test("test", cx));
+    });
+
+    wait_for(
+        cx,
+        |cx| {
+            let term =
+                cx.update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()));
+            term.is_some_and(|t| {
+                cx.update(|cx| t.update(cx, |tv, _| tv.poll_events_for_test()));
+                cx.read(|cx| t.read(cx).snapshot_text().contains("MARKER_READY"))
+            })
+        },
+        Duration::from_secs(30),
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+// ---- 12. 集成测试:launcher menu 交互 ----
+
+#[gpui::test]
+async fn launcher_menu_state_is_workspace_level(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_a = create_worktree(cx, &workspace);
+    let wt_b = create_worktree(cx, &workspace);
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(true));
+    });
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should be open"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(wt_b.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should stay open after switching to wt B"
+    );
+
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(wt_a.clone(), cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "menu should stay open after switching back to wt A"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+// ---- 15. 测试:reveal_in_file_manager ----
+
+#[gpui::test]
+async fn reveal_in_file_manager_noop_without_active(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    // 无 active worktree → no-op,不 panic。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.reveal_in_file_manager_for_test(cx));
+    });
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn reveal_in_file_manager_with_active(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let _wt_path = create_worktree(cx, &workspace);
+
+    // 有 active worktree → spawn 系统命令(不阻塞),不 panic。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.reveal_in_file_manager_for_test(cx));
+    });
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn reveal_in_file_manager_after_close(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    // 关掉最后一个 tab(group 移除,active 仍指向 wt_path)。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(0, cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        0,
+        "group should be removed after closing last tab"
+    );
+
+    // reveal_in_file_manager 仍可用(active 仍指向 wt_path),不 panic。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.reveal_in_file_manager_for_test(cx));
+    });
+
+    shutdown_workspace(cx, &workspace);
+}
+
+// ---- 16. 测试:tab 溢出 —— 大量 tab 不撑爆 tab 栏 ----
+
+/// 大量 tab(20+)不应撑爆 tab 栏:tab_count 正确、切换正常、launcher 菜单正常、
+/// 关闭后 tab_count 递减。验证 `overflow_hidden` + `overflow_x_scroll` 布局修复
+/// 不影响 tab CRUD 状态机。
+#[gpui::test]
+async fn tab_overflow_many_tabs(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo.clone()));
+    cx.run_until_parked();
+
+    let wt_path = create_worktree(cx, &workspace);
+
+    // 初始:1 个 shell tab(新建 worktree 自带)。
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "should start with 1 tab"
+    );
+
+    // 再加 19 个 tab → 共 20 个(远超 tab 栏宽度,触发横向滚动)。
+    for _ in 0..19 {
+        cx.update(|cx| {
+            workspace.update(cx, |v, cx| {
+                v.new_terminal_tab_for_test(ShellKind::Default, cx)
+            });
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        20,
+        "should have 20 tabs after adding 19"
+    );
+
+    // 切换到最后一个 tab(索引 19),验证 active_tab_index 正确。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.switch_tab_for_test(19, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(19),
+        "active tab should be 19 after switch"
+    );
+
+    // 切回第一个 tab。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.switch_tab_for_test(0, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(0),
+        "active tab should be 0 after switch back"
+    );
+
+    // launcher 菜单在大量 tab 下仍能正常开关。
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(true));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "launcher menu should open with 20 tabs"
+    );
+    cx.update(|cx| {
+        workspace.update(cx, |v, _| v.set_launcher_menu_open_for_test(false));
+    });
+    cx.run_until_parked();
+    assert!(
+        !cx.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "launcher menu should close with 20 tabs"
+    );
+
+    // 关闭中间的 tab(索引 10),验证 tab_count 递减且 active 调整。
+    cx.update(|cx| {
+        workspace.update(cx, |v, cx| v.close_tab_for_test(10, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        19,
+        "should have 19 tabs after closing one"
+    );
+
+    // 逐个关闭剩余 tab,验证不 panic。
+    for _ in 0..19 {
+        cx.update(|cx| {
+            workspace.update(cx, |v, cx| v.close_tab_for_test(0, cx));
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        0,
+        "group should be removed after closing all tabs"
     );
 
     shutdown_workspace(cx, &workspace);
