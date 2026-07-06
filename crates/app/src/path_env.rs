@@ -14,7 +14,9 @@
 //!
 //! 一次性、启动时做;带超时兜底(避免用户 shell 配置卡住导致 app 起不来)。
 
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// 跑登录 shell 取真实 PATH,覆盖本进程的 `PATH`。取不到就保持原样(不致命)。
