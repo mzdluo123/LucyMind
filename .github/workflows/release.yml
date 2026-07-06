@@ -39,7 +39,8 @@ jobs:
 
       - name: Create dmg archive
         run: |
-          cd target/release
+          # cargo-bundle 把 .app 产出到 target/release/bundle/osx/,不是 release 根目录。
+          cd target/release/bundle/osx
           # 把 LucyMind.app 打成 zip(GitHub Release 不支持 dmg 上传的权限问题)。
           ditto -c -k --keepParent LucyMind.app LucyMind-macos.zip
 
@@ -47,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LucyMind-macos
-          path: target/release/LucyMind-macos.zip
+          path: target/release/bundle/osx/LucyMind-macos.zip
 
   release-windows:
     name: Release (Windows)
