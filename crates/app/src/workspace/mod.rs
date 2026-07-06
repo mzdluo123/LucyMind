@@ -39,12 +39,32 @@ struct Status {
     is_error: bool,
 }
 
-/// 规范化路径(消除 macOS /private 前缀、绝对/相对差异)。失败(如路径已删)
-/// 时回退原值。所有用作 terminals map key / active 比较的路径都必须先过它,
+/// 规范化路径(消除 macOS /private 前缀、绝对/相对差异、Windows `\\?\` verbatim 前缀)。
+/// 失败(如路径已删)时回退原值。所有用作 terminals map key / active 比较的路径都必须先过它,
 /// 否则"点击时的路径"与"存入时的路径"字符串不等 → 同一 worktree 被当成两个
 /// (表现为:不高亮当前项、点当前项又起新会话顶掉正在跑的)。
+///
+/// Windows 上 `Path::canonicalize` 返回 `\\?\C:\...` verbatim 前缀,git 无法
+/// 在此类路径下创建带 `..` 的工作树目录(报 "could not create leading
+/// directories ... Invalid argument")。剥掉前缀得到普通路径,git/ConPTY 均可正常用。
 fn canon(p: &std::path::Path) -> std::path::PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    strip_verbatim_prefix(&c)
+}
+
+/// 剥掉 Windows verbatim 路径前缀(`\\?\` / `\\?\UNC\`),其余平台原样返回。
+fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    p.to_path_buf()
 }
 
 /// 规范化后比较两个路径。
@@ -131,7 +151,7 @@ impl WorkspaceView {
         let registry = Registry::load_default().unwrap_or_default();
 
         // 校验候选路径是否真的是 git 仓库。
-        let repo = candidate.and_then(|c| lucy_core::git::main_worktree_root(&c));
+        let repo = candidate.as_ref().and_then(|c| lucy_core::git::main_worktree_root(c));
 
         let mut this = Self {
             repo: None,
@@ -577,5 +597,72 @@ impl Render for WorkspaceView {
         }
 
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(windows)]
+    fn strips_verbatim_prefix() {
+        let p = PathBuf::from(r"\\?\C:\Users\foo");
+        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"C:\Users\foo"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn strips_unc_verbatim_prefix() {
+        let p = PathBuf::from(r"\\?\UNC\server\share\foo");
+        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"\\server\share\foo"));
+    }
+
+    #[test]
+    fn no_prefix_unchanged() {
+        // 无 verbatim 前缀的路径原样返回。
+        let p = PathBuf::from(if cfg!(windows) { r"C:\Users\foo" } else { "/usr/foo" });
+        assert_eq!(strip_verbatim_prefix(&p), p);
+    }
+
+    #[test]
+    fn canon_strips_verbatim_for_existing_path() {
+        // canonicalize 对存在路径返回 verbatim 前缀(Windows),canon 应剥掉。
+        let dir = std::env::current_dir().unwrap();
+        let c = canon(&dir);
+        let s = c.to_string_lossy();
+        assert!(
+            !s.starts_with(r"\\?\"),
+            "canon should strip verbatim prefix: {s}"
+        );
+        // 剥前缀后应仍指向同一目录(再 canonicalize 应等价)。
+        assert_eq!(c.canonicalize().unwrap(), dir.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn canon_falls_back_for_missing_path() {
+        // 不存在的路径:canonicalize 失败,回退原值(再剥前缀)。
+        let p = PathBuf::from(if cfg!(windows) {
+            r"C:\this\path\does\not\exist"
+        } else {
+            "/this/path/does/not/exist"
+        });
+        let c = canon(&p);
+        assert_eq!(c, strip_verbatim_prefix(&p));
+    }
+
+    #[test]
+    fn same_path_treats_verbatim_and_plain_as_equal() {
+        // 同一目录的 verbatim 与普通表示应判等(Windows 关键场景:
+        // canonicalize 返回 \\?\ 前缀,而 git/ConPTY 需要普通路径)。
+        let dir = std::env::current_dir().unwrap();
+        let plain = dir.clone();
+        #[cfg(windows)]
+        let verbatim = PathBuf::from(format!(r"\\?\{}", dir.display()));
+        #[cfg(not(windows))]
+        let verbatim = plain.clone();
+        assert_eq!(canon(&plain), canon(&verbatim));
+        assert!(same_path(&plain, &verbatim));
     }
 }
