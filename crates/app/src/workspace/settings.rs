@@ -90,10 +90,10 @@ impl WorkspaceView {
         };
 
         let path = repo.join(".worktree.toml");
-        match config::set_worktree_settings(&path, &s) {
+        match config::set_worktree_settings(self.host.as_ref(), &path, &s) {
             Ok(()) => {
                 // 重载(拿到写回后的配置)并关面板。
-                if let Ok(loaded) = config::load(&path) {
+                if let Ok(loaded) = config::load(self.host.as_ref(), &path) {
                     self.config = loaded.config;
                 }
                 self.settings = None;

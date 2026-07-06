@@ -1,7 +1,8 @@
 //! Git worktree 编排(封装 `git worktree` 子命令)。
 //!
-//! 用 `std::process::Command` 直接调 git CLI(不引 libgit2)——worktree
-//! 操作走 CLI 最稳,且能直接复用 `--porcelain` 的机器可读输出。
+//! 通过 `Host` 抽象执行 git CLI(本机 `LocalHost` 或 WSL `WslHost`),
+//! 不再直接调 `std::process::Command`。worktree 操作走 CLI 最稳,
+//! 且能直接复用 `--porcelain` 的机器可读输出。
 
 mod status;
 mod worktree;
@@ -10,7 +11,8 @@ pub use status::*;
 pub use worktree::*;
 
 use std::path::Path;
-use std::process::Command;
+
+use crate::host::{Host, HostCommand};
 
 /// git 操作错误。
 #[derive(Debug, thiserror::Error)]
@@ -30,20 +32,36 @@ pub enum GitError {
     DirtyWorktree,
 }
 
-/// 运行一条 git 子命令,成功返回 stdout,失败返回 [`GitError::Command`]。
-pub(crate) fn run_git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()?;
+impl From<crate::host::HostError> for GitError {
+    fn from(e: crate::host::HostError) -> Self {
+        match e {
+            crate::host::HostError::Io(io) => GitError::Spawn(io),
+            other => GitError::Spawn(std::io::Error::other(other.to_string())),
+        }
+    }
+}
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+/// 运行一条 git 子命令,成功返回 stdout,失败返回 [`GitError::Command`]。
+///
+/// 通过 `host.run` 执行 `git -C <repo> <args>`,支持本机和 WSL 后端。
+pub(crate) fn run_git(host: &dyn Host, repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    let cmd = HostCommand {
+        program: "git".into(),
+        args: std::iter::once("-C".to_string())
+            .chain(std::iter::once(repo.to_string_lossy().into_owned()))
+            .chain(args.iter().map(|s| s.to_string()))
+            .collect(),
+        cwd: None,
+        env: vec![],
+    };
+    let output = host.run(cmd)?;
+
+    if output.success {
+        Ok(output.stdout)
     } else {
         Err(GitError::Command {
             cmd: format!("git -C {} {}", repo.display(), args.join(" ")),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            stderr: output.stderr.trim().to_owned(),
         })
     }
 }

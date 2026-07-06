@@ -18,6 +18,7 @@ mod status_bar;
 mod tabs;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
@@ -28,6 +29,8 @@ use lucy_core::agent::AgentSpec;
 use lucy_core::config::{self, WorktreeConfig};
 use lucy_core::git::{self, CreateMode, WorktreeEntry};
 use lucy_core::hooks::{self, HookContext, LifecycleEvent};
+use lucy_core::host::LocalHost;
+use lucy_core::host::{Host, HostCommand};
 use lucy_core::session::{self, Registry, Session};
 
 use crate::terminal_view::TerminalView;
@@ -45,48 +48,33 @@ struct Status {
 /// 否则"点击时的路径"与"存入时的路径"字符串不等 → 同一 worktree 被当成两个
 /// (表现为:不高亮当前项、点当前项又起新会话顶掉正在跑的)。
 ///
-/// Windows 上 `Path::canonicalize` 返回 `\\?\C:\...` verbatim 前缀,git 无法
-/// 在此类路径下创建带 `..` 的工作树目录(报 "could not create leading
-/// directories ... Invalid argument")。剥掉前缀得到普通路径,git/ConPTY 均可正常用。
-fn canon(p: &std::path::Path) -> std::path::PathBuf {
-    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    strip_verbatim_prefix(&c)
-}
-
-/// 剥掉 Windows verbatim 路径前缀(`\\?\` / `\\?\UNC\`),其余平台原样返回。
-fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        let s = p.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return std::path::PathBuf::from(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            return std::path::PathBuf::from(rest);
-        }
-    }
-    p.to_path_buf()
+/// 委托 Host 规范化:LocalHost 用 `Path::canonicalize` + 剥 verbatim 前缀;
+/// WslHost 用 `realpath`。
+fn canon(host: &dyn Host, p: &std::path::Path) -> std::path::PathBuf {
+    host.canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// 规范化后比较两个路径。
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    canon(a) == canon(b)
+fn same_path(host: &dyn Host, a: &std::path::Path, b: &std::path::Path) -> bool {
+    canon(host, a) == canon(host, b)
 }
 
 /// 数某 worktree 的未提交改动条数(git status --porcelain 行数)。
-fn count_uncommitted(worktree: &std::path::Path) -> usize {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .args(["status", "--porcelain"])
-        .output()
+fn count_uncommitted(host: &dyn Host, worktree: &std::path::Path) -> usize {
+    let cmd = HostCommand {
+        program: "git".into(),
+        args: vec![
+            "-C".into(),
+            worktree.to_string_lossy().into_owned(),
+            "status".into(),
+            "--porcelain".into(),
+        ],
+        cwd: None,
+        env: vec![],
+    };
+    host.run(cmd)
         .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count()
-        })
+        .map(|o| o.stdout.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0)
 }
 
@@ -131,15 +119,19 @@ pub enum ShellKind {
 impl ShellKind {
     /// 转成 `TerminalView::new` 的 `command` 参数。
     /// `None` = 系统默认 shell;`Some((program, args))` = 指定程序。
-    fn command(&self) -> Option<(String, Vec<String>)> {
+    /// `is_remote` = true 时,Windows 专属 shell(Cmd/PowerShell/Pwsh)不可用,返回 None。
+    fn command(&self, is_remote: bool) -> Option<(String, Vec<String>)> {
         match self {
             ShellKind::Default => None,
             #[cfg(windows)]
-            ShellKind::Cmd => Some(("cmd.exe".into(), vec![])),
+            ShellKind::Cmd if !is_remote => Some(("cmd.exe".into(), vec![])),
             #[cfg(windows)]
-            ShellKind::PowerShell => Some(("powershell.exe".into(), vec![])),
+            ShellKind::PowerShell if !is_remote => Some(("powershell.exe".into(), vec![])),
             #[cfg(windows)]
-            ShellKind::Pwsh => Some(("pwsh.exe".into(), vec![])),
+            ShellKind::Pwsh if !is_remote => Some(("pwsh.exe".into(), vec![])),
+            // 远程模式或非 Windows:Windows 专属 shell 不可用。
+            #[cfg(windows)]
+            ShellKind::Cmd | ShellKind::PowerShell | ShellKind::Pwsh => None,
         }
     }
 
@@ -178,9 +170,26 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
+/// WSL 文件浏览器状态(打开时显示目录树选择器)。
+///
+/// `current_dir` = 当前浏览的目录;`entries` = 该目录的条目列表;
+/// `loading` = 后台 `list_dir` 进行中;`error` = 加载失败信息。
+struct WslBrowser {
+    /// 当前浏览的目录(WSL Linux 路径,如 `/home/user`)。
+    current_dir: PathBuf,
+    /// 当前目录的条目列表(加载完成后填充)。
+    entries: Vec<lucy_core::host::DirEntry>,
+    /// 加载失败时的错误信息(None = 无错误或加载中)。
+    error: Option<String>,
+    /// 是否正在加载(后台 list_dir 进行中)。
+    loading: bool,
+}
+
 pub struct WorkspaceView {
     /// 当前仓库根。None = 尚未选仓库(显示 pick a directory 空态)。
     repo: Option<PathBuf>,
+    /// Host 抽象(命令执行 + 文件操作)。LocalHost = 本机;WslHost = WSL。
+    host: Arc<dyn Host>,
     config: WorktreeConfig,
     worktrees: Vec<WorktreeEntry>,
     /// 本工具开的 session 注册表(标记哪些 worktree 是我们建的)。
@@ -204,6 +213,11 @@ pub struct WorkspaceView {
     settings: Option<SettingsForm>,
     /// launcher 菜单(`+` 按钮下拉)是否打开。
     launcher_menu_open: bool,
+    /// 打开仓库选择弹窗(Local / WSL 二选一)是否打开。
+    open_repo_choice_open: bool,
+    /// WSL 文件浏览器状态(Some = 浏览器打开中)。
+    /// 用户在 WSL 文件系统中导航目录树,选一个目录作为 git 仓库根。
+    wsl_browser: Option<WslBrowser>,
     focus: FocusHandle,
     /// 测试用:覆盖 registry 持久化路径(None = 用默认路径 `~/Library/...`)。
     /// 测试设为 tempdir,避免污染真实用户的 session 注册表。
@@ -219,11 +233,11 @@ const SIDEBAR_DEFAULT_W: f32 = 248.0;
 impl WorkspaceView {
     /// 启动:给一个候选仓库路径(通常来自 cwd)。若它是有效 git 仓库则用,
     /// 否则以空态启动并自动弹目录选择器(.app 双击启动时 cwd 不是仓库的场景)。
-    pub fn new(cx: &mut Context<Self>, candidate: Option<PathBuf>) -> Self {
-        let mut this = Self::construct(cx);
+    pub fn new(cx: &mut Context<Self>, candidate: Option<PathBuf>, host: Arc<dyn Host>) -> Self {
+        let mut this = Self::construct(cx, host);
         let repo = candidate
             .as_ref()
-            .and_then(lucy_core::git::main_worktree_root);
+            .and_then(|c| lucy_core::git::main_worktree_root(this.host.as_ref(), c));
         match repo {
             Some(r) => this.set_repo(r),
             None => this.open_repo_picker(cx), // 无有效仓库 → 启动即弹目录选择器
@@ -236,10 +250,20 @@ impl WorkspaceView {
     /// 目录)直接进 `repo == None` 空态,测试用 `set_repo_for_test` 注入仓库。
     #[cfg(feature = "test-support")]
     pub fn new_for_test(cx: &mut Context<Self>, candidate: Option<PathBuf>) -> Self {
-        let mut this = Self::construct(cx);
+        Self::new_for_test_with_host(cx, candidate, Arc::new(LocalHost))
+    }
+
+    /// 测试专用构造(带 Host):与 [`new_for_test`] 相同但接收自定义 Host。
+    #[cfg(feature = "test-support")]
+    pub fn new_for_test_with_host(
+        cx: &mut Context<Self>,
+        candidate: Option<PathBuf>,
+        host: Arc<dyn Host>,
+    ) -> Self {
+        let mut this = Self::construct(cx, host);
         let repo = candidate
             .as_ref()
-            .and_then(lucy_core::git::main_worktree_root);
+            .and_then(|c| lucy_core::git::main_worktree_root(this.host.as_ref(), c));
         if let Some(r) = repo {
             this.set_repo(r);
         }
@@ -247,10 +271,11 @@ impl WorkspaceView {
     }
 
     /// 公共构造:填默认字段(不弹 prompt、不 set_repo)。
-    fn construct(cx: &mut Context<Self>) -> Self {
+    fn construct(cx: &mut Context<Self>, host: Arc<dyn Host>) -> Self {
         let registry = Registry::load_default().unwrap_or_default();
         Self {
             repo: None,
+            host,
             config: WorktreeConfig::default(),
             worktrees: Vec::new(),
             registry,
@@ -264,6 +289,8 @@ impl WorkspaceView {
             alias_input: None,
             settings: None,
             launcher_menu_open: false,
+            open_repo_choice_open: false,
+            wsl_browser: None,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
             registry_path: None,
@@ -272,16 +299,29 @@ impl WorkspaceView {
 
     /// 设置仓库根:加载其配置、刷新 worktree 列表。
     fn set_repo(&mut self, repo: PathBuf) {
-        let repo = canon(&repo);
-        self.config = config::load(repo.join(".worktree.toml"))
+        let repo = canon(self.host.as_ref(), &repo);
+        self.config = config::load(self.host.as_ref(), repo.join(".worktree.toml"))
             .map(|l| l.config)
             .unwrap_or_default();
-        self.worktrees = git::list(&repo).unwrap_or_default();
-        self.repo = Some(repo);
+        // 先设 repo,list_worktrees_canon 依赖它。
+        self.repo = Some(repo.clone());
+        self.worktrees = self.list_worktrees_canon();
     }
 
-    /// 弹 native 目录选择器让用户选一个 git 仓库。选中后 set_repo。
-    fn open_repo_picker(&self, cx: &mut Context<Self>) {
+    /// 弹出「打开仓库」选择弹窗:用户选 Local(系统文件选择器)或 WSL(路径输入)。
+    /// 选中后切换 Host 并打开仓库。
+    fn open_repo_picker(&mut self, _cx: &mut Context<Self>) {
+        self.open_repo_choice_open = true;
+    }
+
+    /// 切换 Host(LocalHost / WslHost)。打开新仓库前调用。
+    fn set_host(&mut self, host: Arc<dyn Host>) {
+        self.host = host;
+    }
+
+    /// 用系统文件选择器打开本地仓库(LocalHost 模式)。
+    fn open_local_picker(&mut self, cx: &mut Context<Self>) {
+        self.set_host(Arc::new(LocalHost));
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -293,7 +333,7 @@ impl WorkspaceView {
                 if let Some(dir) = paths.into_iter().next() {
                     let _ = this.update(cx, |view, cx| {
                         // 解析成主仓根(选的可能是仓库内子目录)。
-                        match lucy_core::git::main_worktree_root(&dir) {
+                        match lucy_core::git::main_worktree_root(view.host.as_ref(), &dir) {
                             Some(root) => {
                                 view.set_repo(root);
                                 view.set_status("已打开仓库", false);
@@ -308,6 +348,82 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// 打开 WSL 文件浏览器(切换到 WslHost,从根目录开始浏览)。
+    /// 替代旧的文本输入弹窗:用户在目录树中导航选仓库,不用手动输入路径。
+    fn open_wsl_browser(&mut self, cx: &mut Context<Self>) {
+        self.set_host(Arc::new(lucy_core::host::WslHost::default()));
+        let initial = PathBuf::from("/");
+        self.wsl_browser = Some(WslBrowser {
+            current_dir: initial.clone(),
+            entries: Vec::new(),
+            error: None,
+            loading: true,
+        });
+        self.load_wsl_dir(initial, cx);
+        cx.notify();
+    }
+
+    /// 后台加载目录条目(不阻塞 UI 线程;WSL 的 `wsl.exe ls` 可能要 1-2 秒)。
+    fn load_wsl_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        if let Some(b) = &mut self.wsl_browser {
+            b.current_dir = dir.clone();
+            b.loading = true;
+            b.error = None;
+            b.entries.clear();
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { host.list_dir(&dir) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if let Some(b) = &mut view.wsl_browser {
+                    b.loading = false;
+                    match result {
+                        Ok(entries) => b.entries = entries,
+                        Err(e) => b.error = Some(format!("{e}")),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 在 WSL 浏览器中导航到子目录(或 `..` 返回上级)。
+    fn navigate_wsl_dir(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(b) = &self.wsl_browser else {
+            return;
+        };
+        let new_dir = if name == ".." {
+            b.current_dir
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| b.current_dir.clone())
+        } else {
+            b.current_dir.join(&name)
+        };
+        self.load_wsl_dir(new_dir, cx);
+    }
+
+    /// 确认选择当前目录作为仓库根:验证是 git 仓库后 set_repo。
+    fn commit_wsl_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = &self.wsl_browser else {
+            return;
+        };
+        let path = b.current_dir.clone();
+        match git::main_worktree_root(self.host.as_ref(), &path) {
+            Some(root) => {
+                self.set_repo(root);
+                self.wsl_browser = None;
+                self.set_status("已打开仓库", false);
+            }
+            None => self.set_status("所选目录不是 git 仓库", true),
+        }
+        cx.notify();
+    }
+
     /// 该 worktree 是否由本工具建(据注册表)—— 仅用于 ●/· 标记,不作操作门槛。
     fn is_ours(&self, path: &std::path::Path) -> bool {
         match &self.repo {
@@ -318,13 +434,15 @@ impl WorkspaceView {
 
     /// 是否是主仓库本身(主仓不是 worktree,不可关闭)。用规范化路径比较。
     fn is_main_repo(&self, path: &std::path::Path) -> bool {
-        self.repo.as_deref().is_some_and(|r| same_path(path, r))
+        self.repo
+            .as_deref()
+            .is_some_and(|r| same_path(self.host.as_ref(), path, r))
     }
 
     /// 打开一个 worktree:已有终端组则切过去;没有则在该目录起一个默认 shell tab。
     fn open_worktree(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
         // 统一用规范化路径作 key —— 避免同一 worktree 因 /private 前缀被当两个。
-        let wt_path = canon(&wt_path);
+        let wt_path = canon(self.host.as_ref(), &wt_path);
         if !self.terminals.contains_key(&wt_path) {
             // 没有终端组(存量 worktree)→ 起一个默认 shell tab。
             let tab = self.spawn_shell_tab(&wt_path, ShellKind::Default, cx);
@@ -341,7 +459,8 @@ impl WorkspaceView {
     }
 
     /// 起一个 shell 终端 tab(cwd = worktree 路径,注入 TERM + worktree env)。
-    /// `shell` 决定启动哪个 shell(Default = 系统默认;Cmd/PowerShell/Pwsh = 指定程序)。
+    /// `shell` 决定启动哪个 shell(Default = Host 决定:LocalHost 系统默认,WslHost wsl.exe;
+    /// Cmd/PowerShell/Pwsh = 指定程序,仅本地 Windows)。
     /// 供 `open_worktree`(无 group 时建首个 tab)、`new_worktree`(侧边栏 `+` 建
     /// worktree 后开首个 tab)、`new_terminal_tab`(tab 栏 `+` 新建 tab)复用。
     fn spawn_shell_tab(
@@ -366,9 +485,21 @@ impl WorkspaceView {
                 .collect();
 
         let cwd = wt_path.to_path_buf();
-        let command = shell.command();
+        // WSL 模式:env 编入 wsl.exe 命令行(PTY env 不跨 Windows→WSL 边界)。
+        // 本地模式:ShellKind::command() 或 Host::default_shell();env 交给 PTY。
+        let (command, pty_env) = if self.host.is_remote() {
+            (self.host.shell_with_env(wt_path, &env), Vec::new())
+        } else {
+            (
+                shell
+                    .command(self.host.is_remote())
+                    .or_else(|| self.host.default_shell(wt_path)),
+                env,
+            )
+        };
         let terminal = cx.new(|cx| {
-            TerminalView::new(cx, Some(cwd), command, env).expect("failed to start shell terminal")
+            TerminalView::new(cx, Some(cwd), command, pty_env)
+                .expect("failed to start shell terminal")
         });
         TerminalTab {
             terminal,
@@ -404,10 +535,23 @@ impl WorkspaceView {
     }
 
     fn refresh_worktrees(&mut self) {
-        self.worktrees = match &self.repo {
-            Some(r) => git::list(r).unwrap_or_default(),
-            None => Vec::new(),
+        self.worktrees = self.list_worktrees_canon();
+    }
+
+    /// 拉 worktree 列表并预规范化每个 path。
+    ///
+    /// 预规范化避免 render 路径每帧都调 `canonicalize`(WslHost 下每次 spawn
+    /// `wsl.exe realpath`,N 个 worktree × 每帧 4 次 = 持续进程 spawn → UI 卡死)。
+    /// `set_repo` / `refresh_worktrees` 一次性付清,之后 render 直接 `PathBuf` 比较。
+    fn list_worktrees_canon(&self) -> Vec<WorktreeEntry> {
+        let Some(repo) = &self.repo else {
+            return Vec::new();
         };
+        let mut list = git::list(self.host.as_ref(), repo).unwrap_or_default();
+        for wt in &mut list {
+            wt.path = canon(self.host.as_ref(), &wt.path);
+        }
+        list
     }
 
     /// 主流程:建 worktree → postCreate hook → 开一个 shell 终端 tab。
@@ -437,6 +581,7 @@ impl WorkspaceView {
 
         // 1) 建 worktree(带分支占用检查)。
         let add_res = git::add(
+            self.host.as_ref(),
             &repo,
             &wt_path,
             &CreateMode::NewBranch {
@@ -457,6 +602,7 @@ impl WorkspaceView {
             repo_root: repo.clone(),
         };
         let run = hooks::run_event(
+            self.host.as_ref(),
             LifecycleEvent::PostCreate,
             &self.config.hooks,
             &self.config.copy,
@@ -472,7 +618,7 @@ impl WorkspaceView {
         }
 
         // 3) 开 shell 终端 tab(不自动起 agent;用户通过 tab 栏 agent 按钮发命令)。
-        let wt_key = canon(&wt_path);
+        let wt_key = canon(self.host.as_ref(), &wt_path);
         let tab = self.spawn_shell_tab(&wt_key, ShellKind::Default, cx);
         self.terminals.insert(
             wt_key.clone(),
@@ -484,7 +630,7 @@ impl WorkspaceView {
         self.active = Some(wt_key);
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
-        let _ = git::lock(&repo, &wt_path, Some("agent running"));
+        let _ = git::lock(self.host.as_ref(), &repo, &wt_path, Some("agent running"));
 
         // 5) 注册到 session 注册表(标记这是本工具建的)并持久化。
         //    agent 字段记 None —— 用户后续通过 tab 栏按钮选择 agent,
@@ -510,17 +656,17 @@ impl WorkspaceView {
     /// 请求关闭:先停所有 tab 的终端 + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
         // 先停掉该 worktree 的所有 tab 终端(两段式)。用规范化 key 查。
-        if let Some(group) = self.terminals.get(&canon(&wt_path)) {
+        if let Some(group) = self.terminals.get(&canon(self.host.as_ref(), &wt_path)) {
             for tab in &group.tabs {
                 tab.terminal.update(cx, |t, _| t.shutdown());
             }
         }
 
         // 检查未提交改动。
-        let dirty = git::has_uncommitted_changes(&wt_path).unwrap_or(false);
+        let dirty = git::has_uncommitted_changes(self.host.as_ref(), &wt_path).unwrap_or(false);
 
         if dirty {
-            let count = count_uncommitted(&wt_path);
+            let count = count_uncommitted(self.host.as_ref(), &wt_path);
             self.pending_close = Some(PendingClose {
                 dirty_count: count,
                 worktree_path: wt_path,
@@ -580,6 +726,7 @@ impl WorkspaceView {
             repo_root: repo.clone(),
         };
         hooks::run_event(
+            self.host.as_ref(),
             LifecycleEvent::PreRemove,
             &self.config.hooks,
             &self.config.copy,
@@ -588,16 +735,17 @@ impl WorkspaceView {
         );
 
         // 2) 乐观 UI:立即从终端表/active/列表移除该项,界面瞬间响应。
-        let key = canon(&wt_path);
+        let key = canon(self.host.as_ref(), &wt_path);
         self.terminals.remove(&key);
         if self
             .active
             .as_deref()
-            .is_some_and(|a| same_path(a, &wt_path))
+            .is_some_and(|a| same_path(self.host.as_ref(), a, &wt_path))
         {
             self.active = self.terminals.keys().next().cloned();
         }
-        self.worktrees.retain(|w| !same_path(&w.path, &wt_path));
+        self.worktrees
+            .retain(|w| !same_path(self.host.as_ref(), &w.path, &wt_path));
         self.registry.unregister(&repo, &wt_path);
         self.persist_registry();
         self.set_status(format!("正在关闭 {branch}…"), false);
@@ -607,14 +755,15 @@ impl WorkspaceView {
         let repo_bg = repo.clone();
         let wt_bg = wt_path.clone();
         let branch_bg = branch.clone();
+        let host_bg = self.host.clone();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 // 慢 git 放后台执行器(不占 UI 线程)。
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        let _ = git::unlock(&repo_bg, &wt_bg);
-                        git::remove(&repo_bg, &wt_bg, force)
+                        let _ = git::unlock(host_bg.as_ref(), &repo_bg, &wt_bg);
+                        git::remove(host_bg.as_ref(), &repo_bg, &wt_bg, force)
                     })
                     .await;
 
@@ -672,17 +821,26 @@ impl WorkspaceView {
     /// 在系统文件管理器中打开 active worktree 目录。
     /// macOS: `open`、Windows: `explorer`、Linux: `xdg-open`。
     /// 用 `spawn()`(非 `status()`),不阻塞 UI 线程。无 active 时 no-op。
+    /// 测试构建(`test-support` feature)下不 spawn(避免弹真实 explorer 窗口)。
     fn reveal_in_file_manager(&self, _cx: &mut Context<Self>) {
         let Some(path) = &self.active else {
             return;
         };
-        let path = path.clone();
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(&path).spawn();
-        #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("explorer").arg(&path).spawn();
-        #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+        #[cfg(not(feature = "test-support"))]
+        {
+            let path = path.clone();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&path).spawn();
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("explorer").arg(&path).spawn();
+            #[cfg(target_os = "linux")]
+            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+        }
+        #[cfg(feature = "test-support")]
+        {
+            // 测试时 no-op:不 spawn 真实文件管理器(避免弹 explorer 窗口)。
+            let _ = path;
+        }
     }
 
     /// 关闭指定 tab(tab `✕` 按钮触发)。只停该终端,不删 worktree。
@@ -826,7 +984,7 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn terminals_contains(&self, path: &std::path::Path) -> bool {
         self.terminals
-            .get(&canon(path))
+            .get(&canon(self.host.as_ref(), path))
             .is_some_and(|g| !g.tabs.is_empty())
     }
 
@@ -858,7 +1016,7 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn terminal_at(&self, path: &std::path::Path) -> Option<&Entity<TerminalView>> {
         self.terminals
-            .get(&canon(path))
+            .get(&canon(self.host.as_ref(), path))
             .and_then(|g| g.tabs.get(g.active_tab))
             .map(|t| &t.terminal)
     }
@@ -867,7 +1025,7 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn tab_count(&self, path: &std::path::Path) -> usize {
         self.terminals
-            .get(&canon(path))
+            .get(&canon(self.host.as_ref(), path))
             .map(|g| g.tabs.len())
             .unwrap_or(0)
     }
@@ -971,7 +1129,7 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn tab_title_for_test(&self, path: &std::path::Path) -> Option<String> {
         self.terminals
-            .get(&canon(path))
+            .get(&canon(self.host.as_ref(), path))
             .and_then(|g| g.tabs.get(g.active_tab))
             .map(|t| t.title.clone())
     }
@@ -996,6 +1154,61 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn set_registry_path_for_test(&mut self, path: PathBuf) {
         self.registry_path = Some(path);
+    }
+
+    /// Host 是否为远程(WSL/SSH)。测试用于验证 Host 类型。
+    #[cfg(feature = "test-support")]
+    pub fn is_remote_host(&self) -> bool {
+        self.host.is_remote()
+    }
+
+    /// WSL 文件浏览器是否打开。
+    #[cfg(feature = "test-support")]
+    pub fn wsl_browser_open(&self) -> bool {
+        self.wsl_browser.is_some()
+    }
+
+    /// 直接触发 open_repo_picker(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn open_repo_picker_for_test(&mut self, cx: &mut Context<Self>) {
+        self.open_repo_picker(cx);
+    }
+
+    /// 打开仓库选择弹窗是否打开。
+    #[cfg(feature = "test-support")]
+    pub fn open_repo_choice_open(&self) -> bool {
+        self.open_repo_choice_open
+    }
+
+    /// 直接触发 open_wsl_browser(测试绕过 UI 点击)。
+    /// 切换到 WslHost 并打开 WSL 文件浏览器。
+    #[cfg(feature = "test-support")]
+    pub fn open_wsl_browser_for_test(&mut self, cx: &mut Context<Self>) {
+        self.open_wsl_browser(cx);
+    }
+
+    /// 直接触发 open_local_picker(测试绕过 UI 点击)。
+    /// 注意:会调用 prompt_for_paths,TestPlatform 未实现会 panic。
+    #[cfg(feature = "test-support")]
+    pub fn open_local_picker_for_test(&mut self, cx: &mut Context<Self>) {
+        self.open_local_picker(cx);
+    }
+
+    /// 直接提交 WSL 浏览器当前目录(测试绕过 UI 点击)。
+    #[cfg(feature = "test-support")]
+    pub fn commit_wsl_browser_for_test(&mut self, cx: &mut Context<Self>) {
+        self.commit_wsl_browser(cx);
+    }
+
+    /// 设置 WSL 浏览器当前目录(测试注入,不通过 UI 导航)。
+    #[cfg(feature = "test-support")]
+    pub fn set_wsl_browser_dir_for_test(&mut self, dir: PathBuf) {
+        if let Some(b) = &mut self.wsl_browser {
+            b.current_dir = dir;
+            b.loading = false;
+            b.error = None;
+            b.entries.clear();
+        }
     }
 }
 
@@ -1101,6 +1314,16 @@ impl Render for WorkspaceView {
                     cx.notify();
                     cx.stop_propagation();
                 }
+                if this.wsl_browser.is_some() && ev.keystroke.key == "escape" {
+                    this.wsl_browser = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                if this.open_repo_choice_open && ev.keystroke.key == "escape" {
+                    this.open_repo_choice_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
             }))
             .child(self.sidebar(cx))
             .child(splitter)
@@ -1118,6 +1341,14 @@ impl Render for WorkspaceView {
         if self.settings.is_some() {
             root = root.child(self.settings_dialog(cx));
         }
+        // 打开仓库选择弹窗(Local / WSL)打开中 → 叠加选择模态。
+        if self.open_repo_choice_open {
+            root = root.child(self.open_repo_choice_dialog(cx));
+        }
+        // WSL 文件浏览器打开中 → 叠加浏览器模态。
+        if self.wsl_browser.is_some() {
+            root = root.child(self.wsl_browser_dialog(cx));
+        }
         // launcher 菜单(`+` 按钮下拉)打开中 → 叠加菜单 overlay。
         if self.launcher_menu_open {
             root = root.child(self.launcher_menu(cx));
@@ -1130,41 +1361,15 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lucy_core::host::LocalHost;
     use std::path::PathBuf;
-
-    #[test]
-    #[cfg(windows)]
-    fn strips_verbatim_prefix() {
-        let p = PathBuf::from(r"\\?\C:\Users\foo");
-        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"C:\Users\foo"));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn strips_unc_verbatim_prefix() {
-        let p = PathBuf::from(r"\\?\UNC\server\share\foo");
-        assert_eq!(
-            strip_verbatim_prefix(&p),
-            PathBuf::from(r"\\server\share\foo")
-        );
-    }
-
-    #[test]
-    fn no_prefix_unchanged() {
-        // 无 verbatim 前缀的路径原样返回。
-        let p = PathBuf::from(if cfg!(windows) {
-            r"C:\Users\foo"
-        } else {
-            "/usr/foo"
-        });
-        assert_eq!(strip_verbatim_prefix(&p), p);
-    }
 
     #[test]
     fn canon_strips_verbatim_for_existing_path() {
         // canonicalize 对存在路径返回 verbatim 前缀(Windows),canon 应剥掉。
+        let host = LocalHost;
         let dir = std::env::current_dir().unwrap();
-        let c = canon(&dir);
+        let c = canon(&host, &dir);
         let s = c.to_string_lossy();
         assert!(
             !s.starts_with(r"\\?\"),
@@ -1177,27 +1382,38 @@ mod tests {
     #[test]
     fn canon_falls_back_for_missing_path() {
         // 不存在的路径:canonicalize 失败,回退原值(再剥前缀)。
+        let host = LocalHost;
         let p = PathBuf::from(if cfg!(windows) {
             r"C:\this\path\does\not\exist"
         } else {
             "/this/path/does/not/exist"
         });
-        let c = canon(&p);
-        assert_eq!(c, strip_verbatim_prefix(&p));
+        let c = canon(&host, &p);
+        // 回退原值(LocalHost canonicalize 失败时返回原路径,Windows 下剥 verbatim 前缀)。
+        #[cfg(windows)]
+        {
+            let s = c.to_string_lossy();
+            assert!(!s.starts_with(r"\\?\"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(c, p);
+        }
     }
 
     #[test]
     fn same_path_treats_verbatim_and_plain_as_equal() {
         // 同一目录的 verbatim 与普通表示应判等(Windows 关键场景:
         // canonicalize 返回 \\?\ 前缀,而 git/ConPTY 需要普通路径)。
+        let host = LocalHost;
         let dir = std::env::current_dir().unwrap();
         let plain = dir.clone();
         #[cfg(windows)]
         let verbatim = PathBuf::from(format!(r"\\?\{}", dir.display()));
         #[cfg(not(windows))]
         let verbatim = plain.clone();
-        assert_eq!(canon(&plain), canon(&verbatim));
-        assert!(same_path(&plain, &verbatim));
+        assert_eq!(canon(&host, &plain), canon(&host, &verbatim));
+        assert!(same_path(&host, &plain, &verbatim));
     }
 
     // ---- agent_command_string 引号转义测试 ----
@@ -1267,7 +1483,9 @@ mod tests {
     #[test]
     fn shell_kind_default_command_is_none() {
         // Default 用系统默认 shell(command = None),交由 alacritty tty 层决定。
-        assert!(ShellKind::Default.command().is_none());
+        assert!(ShellKind::Default.command(false).is_none());
+        // 远程模式也返回 None(交由 Host::shell_with_env)。
+        assert!(ShellKind::Default.command(true).is_none());
     }
 
     #[test]
@@ -1278,9 +1496,18 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn shell_kind_cmd_command() {
-        let (program, args) = ShellKind::Cmd.command().expect("Cmd should have command");
+        let (program, args) = ShellKind::Cmd
+            .command(false)
+            .expect("Cmd should have command in local mode");
         assert_eq!(program, "cmd.exe");
         assert!(args.is_empty(), "Cmd args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_cmd_command_remote_is_none() {
+        // 远程模式(WSL)下 Windows 专属 shell 不可用。
+        assert!(ShellKind::Cmd.command(true).is_none());
     }
 
     #[test]
@@ -1293,10 +1520,16 @@ mod tests {
     #[cfg(windows)]
     fn shell_kind_powershell_command() {
         let (program, args) = ShellKind::PowerShell
-            .command()
-            .expect("PowerShell should have command");
+            .command(false)
+            .expect("PowerShell should have command in local mode");
         assert_eq!(program, "powershell.exe");
         assert!(args.is_empty(), "PowerShell args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_powershell_command_remote_is_none() {
+        assert!(ShellKind::PowerShell.command(true).is_none());
     }
 
     #[test]
@@ -1308,9 +1541,17 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn shell_kind_pwsh_command() {
-        let (program, args) = ShellKind::Pwsh.command().expect("Pwsh should have command");
+        let (program, args) = ShellKind::Pwsh
+            .command(false)
+            .expect("Pwsh should have command in local mode");
         assert_eq!(program, "pwsh.exe");
         assert!(args.is_empty(), "Pwsh args should be empty");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_kind_pwsh_command_remote_is_none() {
+        assert!(ShellKind::Pwsh.command(true).is_none());
     }
 
     #[test]
@@ -1333,7 +1574,8 @@ mod tests {
             ShellKind::Pwsh,
         ];
         for v in variants {
-            let _ = v.command();
+            let _ = v.command(false);
+            let _ = v.command(true);
             let _ = v.label();
         }
     }

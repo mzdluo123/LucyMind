@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lucy_core::git::{self, CreateMode, GitError};
+use lucy_core::host::LocalHost;
 
 /// 建一个带初始提交、默认分支为 `main` 的临时仓库,返回 (tempdir, repo_path)。
 fn init_repo() -> (tempfile::TempDir, PathBuf) {
@@ -42,10 +43,12 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 #[test]
 fn creates_worktree_on_new_branch() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-feature");
 
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::NewBranch {
@@ -57,7 +60,7 @@ fn creates_worktree_on_new_branch() {
 
     assert!(wt.join("README.md").is_file(), "worktree checked out files");
 
-    let list = git::list(&repo).expect("list");
+    let list = git::list(&host, &repo).expect("list");
     assert!(list
         .iter()
         .any(|e| e.branch.as_deref() == Some("feature/x")));
@@ -65,11 +68,13 @@ fn creates_worktree_on_new_branch() {
 
 #[test]
 fn creates_worktree_on_existing_branch() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     run(&repo, &["branch", "existing"]);
     let wt = dir.path().join("wt-existing");
 
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::ExistingBranch {
@@ -83,12 +88,13 @@ fn creates_worktree_on_existing_branch() {
 
 #[test]
 fn creates_detached_worktree() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-detached");
 
-    git::add(&repo, &wt, &CreateMode::Detached { commitish: None }).expect("add detached");
+    git::add(&host, &repo, &wt, &CreateMode::Detached { commitish: None }).expect("add detached");
 
-    let list = git::list(&repo).expect("list");
+    let list = git::list(&host, &repo).expect("list");
     // detached 条目 branch 为 None。
     assert!(list
         .iter()
@@ -97,11 +103,13 @@ fn creates_detached_worktree() {
 
 #[test]
 fn rejects_branch_already_checked_out() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     run(&repo, &["branch", "shared"]);
 
     let wt1 = dir.path().join("wt1");
     git::add(
+        &host,
         &repo,
         &wt1,
         &CreateMode::ExistingBranch {
@@ -113,6 +121,7 @@ fn rejects_branch_already_checked_out() {
     // 第二次检出同分支 → 明确的 BranchInUse,而非 git 原始报错。
     let wt2 = dir.path().join("wt2");
     let err = git::add(
+        &host,
         &repo,
         &wt2,
         &CreateMode::ExistingBranch {
@@ -125,9 +134,11 @@ fn rejects_branch_already_checked_out() {
 
 #[test]
 fn remove_rejects_dirty_worktree_then_force_succeeds() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-dirty");
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::NewBranch {
@@ -140,20 +151,22 @@ fn remove_rejects_dirty_worktree_then_force_succeeds() {
     // 制造未提交改动。
     std::fs::write(wt.join("scratch.txt"), "uncommitted\n").unwrap();
 
-    let err = git::remove(&repo, &wt, false).expect_err("dirty remove must be rejected");
+    let err = git::remove(&host, &repo, &wt, false).expect_err("dirty remove must be rejected");
     assert!(matches!(err, GitError::DirtyWorktree));
     assert!(wt.is_dir(), "worktree still present after rejected remove");
 
     // force 后成功。
-    git::remove(&repo, &wt, true).expect("force remove");
+    git::remove(&host, &repo, &wt, true).expect("force remove");
     assert!(!wt.is_dir(), "worktree gone after force remove");
 }
 
 #[test]
 fn remove_clean_worktree_succeeds() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-clean");
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::NewBranch {
@@ -163,15 +176,17 @@ fn remove_clean_worktree_succeeds() {
     )
     .unwrap();
 
-    git::remove(&repo, &wt, false).expect("clean remove ok");
+    git::remove(&host, &repo, &wt, false).expect("clean remove ok");
     assert!(!wt.is_dir());
 }
 
 #[test]
 fn lock_unlock_roundtrip() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-lock");
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::NewBranch {
@@ -181,12 +196,12 @@ fn lock_unlock_roundtrip() {
     )
     .unwrap();
 
-    git::lock(&repo, &wt, Some("agent running")).expect("lock");
-    let list = git::list(&repo).expect("list");
+    git::lock(&host, &repo, &wt, Some("agent running")).expect("lock");
+    let list = git::list(&host, &repo).expect("list");
     assert!(list.iter().any(|e| same_path(&e.path, &wt) && e.locked));
 
-    git::unlock(&repo, &wt).expect("unlock");
-    let list = git::list(&repo).expect("list");
+    git::unlock(&host, &repo, &wt).expect("unlock");
+    let list = git::list(&host, &repo).expect("list");
     assert!(list.iter().any(|e| same_path(&e.path, &wt) && !e.locked));
 }
 
@@ -211,20 +226,23 @@ fn random_branch_name_varies() {
 
 #[test]
 fn main_worktree_root_from_subdir() {
+    let host = LocalHost;
     let (_dir, repo) = init_repo();
     // 从子目录也应解析出主仓根,而非子目录本身。
     let subdir = repo.join("crates/app");
     std::fs::create_dir_all(&subdir).unwrap();
 
-    let root = git::main_worktree_root(&subdir).expect("should resolve main root");
+    let root = git::main_worktree_root(&host, &subdir).expect("should resolve main root");
     assert!(same_path(&root, &repo), "{root:?} 应等于主仓 {repo:?}");
 }
 
 #[test]
 fn main_worktree_root_from_inside_worktree() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     let wt = dir.path().join("wt-a");
     git::add(
+        &host,
         &repo,
         &wt,
         &CreateMode::NewBranch {
@@ -234,24 +252,27 @@ fn main_worktree_root_from_inside_worktree() {
     )
     .unwrap();
     // 在 worktree 内解析,应仍指向主仓(不是这个 worktree)。
-    let root = git::main_worktree_root(&wt).expect("resolve");
+    let root = git::main_worktree_root(&host, &wt).expect("resolve");
     assert!(same_path(&root, &repo), "worktree 内应解析到主仓");
 }
 
 #[test]
 fn branch_exists_detects() {
+    let host = LocalHost;
     let (_dir, repo) = init_repo();
     run(&repo, &["branch", "feature/x"]);
-    assert!(git::branch_exists(&repo, "feature/x"));
-    assert!(!git::branch_exists(&repo, "nonexistent"));
+    assert!(git::branch_exists(&host, &repo, "feature/x"));
+    assert!(!git::branch_exists(&host, &repo, "nonexistent"));
 }
 
 #[test]
 fn list_reflects_multiple_worktrees() {
+    let host = LocalHost;
     let (dir, repo) = init_repo();
     for (i, br) in ["a", "b"].iter().enumerate() {
         let wt = dir.path().join(format!("wt-{i}"));
         git::add(
+            &host,
             &repo,
             &wt,
             &CreateMode::NewBranch {
@@ -261,7 +282,7 @@ fn list_reflects_multiple_worktrees() {
         )
         .unwrap();
     }
-    let list = git::list(&repo).expect("list");
+    let list = git::list(&host, &repo).expect("list");
     // 主仓 + 2 个 worktree = 3。
     assert_eq!(list.len(), 3);
 }

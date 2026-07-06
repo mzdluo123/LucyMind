@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::host::Host;
+
 use super::{run_git, GitError};
 
 /// 一个已存在的 worktree 条目(来自 `git worktree list --porcelain`)。
@@ -20,14 +22,17 @@ pub struct WorktreeEntry {
 /// 工作区是否有未提交改动(含未跟踪文件)。
 ///
 /// 用于:创建前的脏工作区提示、删除前的安全检查(preRemove 核心价值)。
-pub fn has_uncommitted_changes(repo: impl AsRef<Path>) -> Result<bool, GitError> {
-    let out = run_git(repo.as_ref(), &["status", "--porcelain"])?;
+pub fn has_uncommitted_changes(host: &dyn Host, repo: impl AsRef<Path>) -> Result<bool, GitError> {
+    let out = run_git(host, repo.as_ref(), &["status", "--porcelain"])?;
     Ok(!out.trim().is_empty())
 }
 
 /// 列出仓库的所有 worktree。
-pub fn list_worktrees(repo: impl AsRef<Path>) -> Result<Vec<WorktreeEntry>, GitError> {
-    let out = run_git(repo.as_ref(), &["worktree", "list", "--porcelain"])?;
+pub fn list_worktrees(
+    host: &dyn Host,
+    repo: impl AsRef<Path>,
+) -> Result<Vec<WorktreeEntry>, GitError> {
+    let out = run_git(host, repo.as_ref(), &["worktree", "list", "--porcelain"])?;
     Ok(parse_worktree_list(&out))
 }
 
@@ -36,11 +41,12 @@ pub fn list_worktrees(repo: impl AsRef<Path>) -> Result<Vec<WorktreeEntry>, GitE
 /// git 硬限制:同一分支不能被多个 worktree 同时检出。创建前用它给出
 /// 清晰的冲突错误,而非把 git 原始报错甩给用户。
 pub fn branch_checked_out_at(
+    host: &dyn Host,
     repo: impl AsRef<Path>,
     branch: &str,
     exclude_path: Option<&Path>,
 ) -> Result<Option<PathBuf>, GitError> {
-    for entry in list_worktrees(repo)? {
+    for entry in list_worktrees(host, repo)? {
         if entry.branch.as_deref() == Some(branch) {
             if let Some(ex) = exclude_path {
                 if entry.path == ex {

@@ -13,4 +13,7 @@ pub mod agent;
 pub mod config;
 pub mod git;
 pub mod hooks;
+pub mod host;
 pub mod session;
+
+pub use host::{Host, HostCommand, HostError, HostOutput, LocalHost, WslHost};

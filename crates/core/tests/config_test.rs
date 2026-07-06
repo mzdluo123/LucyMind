@@ -1,6 +1,7 @@
 //! U2 测试:`.worktree.toml` 解析与校验。
 
 use lucy_core::config::{self, Location};
+use lucy_core::host::LocalHost;
 
 #[test]
 fn parses_full_config() {
@@ -107,38 +108,40 @@ fn resolve_sibling_dir_substitutes_repo_name() {
 
 #[test]
 fn alias_set_read_roundtrip_preserves_comments() {
+    let host = LocalHost;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
     // 带注释 + 已有配置的文件。
     std::fs::write(&path, "# 我的注释\n[worktree]\ndefault_base = \"main\"\n").unwrap();
 
     // 设别名。
-    config::set_alias(&path, "feature/x", "登录重构").unwrap();
+    config::set_alias(&host, &path, "feature/x", "登录重构").unwrap();
 
     // 读回:别名在,注释还在,原配置还在。
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("# 我的注释"), "注释应保留");
     assert!(text.contains("default_base"), "原配置应保留");
-    let loaded = config::load(&path).unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     assert_eq!(loaded.config.alias.get("feature/x").unwrap(), "登录重构");
 
     // 改别名。
-    config::set_alias(&path, "feature/x", "新名字").unwrap();
-    let loaded = config::load(&path).unwrap();
+    config::set_alias(&host, &path, "feature/x", "新名字").unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     assert_eq!(loaded.config.alias.get("feature/x").unwrap(), "新名字");
 
     // 空串删除别名。
-    config::set_alias(&path, "feature/x", "").unwrap();
-    let loaded = config::load(&path).unwrap();
+    config::set_alias(&host, &path, "feature/x", "").unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     assert!(!loaded.config.alias.contains_key("feature/x"));
 }
 
 #[test]
 fn set_alias_creates_file_if_missing() {
+    let host = LocalHost;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
-    config::set_alias(&path, "main", "主干").unwrap();
-    let loaded = config::load(&path).unwrap();
+    config::set_alias(&host, &path, "main", "主干").unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     assert_eq!(loaded.config.alias.get("main").unwrap(), "主干");
 }
 
@@ -155,7 +158,7 @@ fn inside_location_parses() {
 #[test]
 fn settings_write_read_roundtrip_preserves_comments_and_alias() {
     use lucy_core::config::EditableSettings;
-
+    let host = LocalHost;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
     // 已有注释 + 别名 + agents 段的文件 —— 设置面板不该动它们。
@@ -174,10 +177,10 @@ fn settings_write_read_roundtrip_preserves_comments_and_alias() {
         copy_files: vec![".env".to_string()],
         fail_fast: false,
     };
-    config::set_worktree_settings(&path, &s).unwrap();
+    config::set_worktree_settings(&host, &path, &s).unwrap();
 
     // 读回:字段都对。
-    let loaded = config::load(&path).unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     let c = &loaded.config;
     assert_eq!(c.worktree.location, Location::Inside);
     assert_eq!(c.worktree.dir, "../{repo}-wt");
@@ -200,7 +203,7 @@ fn settings_write_read_roundtrip_preserves_comments_and_alias() {
 #[test]
 fn settings_write_rejects_empty_sibling_dir() {
     use lucy_core::config::EditableSettings;
-
+    let host = LocalHost;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
     let s = EditableSettings {
@@ -212,7 +215,8 @@ fn settings_write_rejects_empty_sibling_dir() {
         copy_files: vec![],
         fail_fast: true,
     };
-    let err = config::set_worktree_settings(&path, &s).expect_err("empty sibling dir must fail");
+    let err =
+        config::set_worktree_settings(&host, &path, &s).expect_err("empty sibling dir must fail");
     assert!(matches!(err, config::ConfigError::Validation(_)));
     // 校验失败不落盘。
     assert!(!path.exists(), "校验失败不应写文件");
@@ -221,7 +225,7 @@ fn settings_write_rejects_empty_sibling_dir() {
 #[test]
 fn settings_write_creates_file_if_missing() {
     use lucy_core::config::EditableSettings;
-
+    let host = LocalHost;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(".worktree.toml");
     let s = EditableSettings {
@@ -233,8 +237,8 @@ fn settings_write_creates_file_if_missing() {
         copy_files: vec![],
         fail_fast: true,
     };
-    config::set_worktree_settings(&path, &s).unwrap();
+    config::set_worktree_settings(&host, &path, &s).unwrap();
     assert!(path.exists());
-    let loaded = config::load(&path).unwrap();
+    let loaded = config::load(&host, &path).unwrap();
     assert_eq!(loaded.config.worktree.default_base, "main");
 }

@@ -2,12 +2,16 @@
 //!
 //! 加载流程:读文件 → TOML 反序列化(强类型,缺失给默认)→ 语义校验。
 //! 校验产出**警告**(未知 key,非致命)与**错误**(如 sibling 缺 dir,致命)。
+//!
+//! 通过 `Host` 抽象读写文件(本机 `LocalHost` 或 WSL `WslHost`)。
 
 mod schema;
 
 pub use schema::*;
 
 use std::path::Path;
+
+use crate::host::Host;
 
 /// 配置加载/校验错误。
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +24,15 @@ pub enum ConfigError {
     Validation(String),
 }
 
+impl From<crate::host::HostError> for ConfigError {
+    fn from(e: crate::host::HostError) -> Self {
+        match e {
+            crate::host::HostError::Io(io) => ConfigError::Io(io),
+            other => ConfigError::Io(std::io::Error::other(other.to_string())),
+        }
+    }
+}
+
 /// 加载结果:配置 + 非致命警告列表(供 UI 展示)。
 #[derive(Debug)]
 pub struct Loaded {
@@ -27,9 +40,9 @@ pub struct Loaded {
     pub warnings: Vec<String>,
 }
 
-/// 从文件加载并校验 `.worktree.toml`。
-pub fn load(path: impl AsRef<Path>) -> Result<Loaded, ConfigError> {
-    let text = std::fs::read_to_string(path)?;
+/// 从文件加载并校验 `.worktree.toml`(通过 Host 读取,支持本机/WSL)。
+pub fn load(host: &dyn Host, path: impl AsRef<Path>) -> Result<Loaded, ConfigError> {
+    let text = host.read_to_string(path.as_ref())?;
     parse(&text)
 }
 
@@ -79,9 +92,14 @@ pub fn resolve_sibling_dir(dir_template: &str, repo_name: &str) -> String {
 
 /// 在 `.worktree.toml` 里设置某分支的别名(格式保留:用 toml_edit 只改 `[alias]`
 /// 表,不动用户的注释/其它配置)。`alias` 为空串则删除该别名。文件不存在则新建。
-pub fn set_alias(path: impl AsRef<Path>, branch: &str, alias: &str) -> Result<(), ConfigError> {
+pub fn set_alias(
+    host: &dyn Host,
+    path: impl AsRef<Path>,
+    branch: &str,
+    alias: &str,
+) -> Result<(), ConfigError> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = host.read_to_string(path).unwrap_or_default();
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| ConfigError::Validation(format!("解析 toml_edit 失败: {e}")))?;
@@ -101,9 +119,9 @@ pub fn set_alias(path: impl AsRef<Path>, branch: &str, alias: &str) -> Result<()
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        host.create_dir_all(parent)?;
     }
-    std::fs::write(path, doc.to_string())?;
+    host.write(path, &doc.to_string())?;
     Ok(())
 }
 
@@ -141,6 +159,7 @@ impl EditableSettings {
 /// 写前做与 [`load`] 同款的语义校验(如 sibling 必须有 dir),不合法则返回
 /// [`ConfigError::Validation`],不落盘。
 pub fn set_worktree_settings(
+    host: &dyn Host,
     path: impl AsRef<Path>,
     s: &EditableSettings,
 ) -> Result<(), ConfigError> {
@@ -152,7 +171,7 @@ pub fn set_worktree_settings(
     }
 
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = host.read_to_string(path).unwrap_or_default();
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| ConfigError::Validation(format!("解析 toml_edit 失败: {e}")))?;
@@ -186,9 +205,9 @@ pub fn set_worktree_settings(
     hooks_tbl["options"]["fail_fast"] = toml_edit::value(s.fail_fast);
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        host.create_dir_all(parent)?;
     }
-    std::fs::write(path, doc.to_string())?;
+    host.write(path, &doc.to_string())?;
     Ok(())
 }
 

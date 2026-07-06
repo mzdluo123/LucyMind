@@ -11,9 +11,13 @@ pub mod theme;
 pub mod ui;
 pub mod workspace;
 
+use std::sync::Arc;
+
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
+
+use lucy_core::host::LocalHost;
 
 use assets::Assets;
 use workspace::WorkspaceView;
@@ -41,6 +45,10 @@ pub fn run() {
     // 场景),否则以空态启动并弹目录选择器(.app 双击启动 cwd 不是仓库的场景)。
     let candidate = std::env::current_dir().ok();
 
+    // Host:默认 LocalHost。用户点「打开仓库」时可选 Local(系统文件选择器)
+    // 或 WSL(路径输入),运行时切换 Host。
+    let host: Arc<dyn lucy_core::host::Host> = Arc::new(LocalHost);
+
     // with_assets:注册内嵌 SVG 图标源,svg().path("icons/...") 才能加载。
     Application::new()
         .with_assets(Assets)
@@ -49,6 +57,7 @@ pub fn run() {
             gpui_component::init(cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(680.0)), cx);
+            let host = host.clone();
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -65,7 +74,8 @@ pub fn run() {
                 move |window, cx| {
                     // 把根视图包进 gpui-component 的 Root —— 它的 Input/弹层/焦点管理
                     // 依赖 Root 提供的全局上下文,否则渲染/聚焦 Input 会 panic。
-                    let workspace = cx.new(|cx| WorkspaceView::new(cx, candidate.clone()));
+                    let workspace =
+                        cx.new(|cx| WorkspaceView::new(cx, candidate.clone(), host.clone()));
                     let view: gpui::AnyView = workspace.into();
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
                 },

@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::host::Host;
+
 use super::{
     branch_checked_out_at, has_uncommitted_changes, list_worktrees, run_git, GitError,
     WorktreeEntry,
@@ -26,6 +28,7 @@ pub enum CreateMode {
 /// - `NewBranch` / `ExistingBranch`:创建前检查目标分支是否已被其它 worktree 检出,
 ///   命中则返回 [`GitError::BranchInUse`]。
 pub fn add(
+    host: &dyn Host,
     repo: impl AsRef<Path>,
     path: impl AsRef<Path>,
     mode: &CreateMode,
@@ -41,7 +44,7 @@ pub fn add(
         CreateMode::Detached { .. } => None,
     };
     if let Some(branch) = branch {
-        if let Some(existing) = branch_checked_out_at(repo, branch, None)? {
+        if let Some(existing) = branch_checked_out_at(host, repo, branch, None)? {
             return Err(GitError::BranchInUse {
                 branch: branch.to_string(),
                 path: existing.display().to_string(),
@@ -55,26 +58,26 @@ pub fn add(
     match mode {
         CreateMode::NewBranch { branch, base } => {
             args.extend(["-b", branch.as_str(), path_str, base.as_str()]);
-            run_git(repo, &args)?;
+            run_git(host, repo, &args)?;
         }
         CreateMode::ExistingBranch { branch } => {
             args.extend([path_str, branch.as_str()]);
-            run_git(repo, &args)?;
+            run_git(host, repo, &args)?;
         }
         CreateMode::Detached { commitish } => {
             args.extend(["--detach", path_str]);
             if let Some(c) = commitish {
                 args.push(c.as_str());
             }
-            run_git(repo, &args)?;
+            run_git(host, repo, &args)?;
         }
     }
     Ok(())
 }
 
 /// 列出仓库所有 worktree(转发 [`list_worktrees`],便于从本模块统一入口调用)。
-pub fn list(repo: impl AsRef<Path>) -> Result<Vec<WorktreeEntry>, GitError> {
-    list_worktrees(repo)
+pub fn list(host: &dyn Host, repo: impl AsRef<Path>) -> Result<Vec<WorktreeEntry>, GitError> {
+    list_worktrees(host, repo)
 }
 
 /// 删除一个 worktree。
@@ -82,6 +85,7 @@ pub fn list(repo: impl AsRef<Path>) -> Result<Vec<WorktreeEntry>, GitError> {
 /// 未 `force` 时,先检查目标 worktree 的未提交改动,非空则拒绝
 /// ([`GitError::DirtyWorktree`])——这是 preRemove 语义的安全底线。
 pub fn remove(
+    host: &dyn Host,
     repo: impl AsRef<Path>,
     worktree_path: impl AsRef<Path>,
     force: bool,
@@ -89,7 +93,7 @@ pub fn remove(
     let repo = repo.as_ref();
     let wt = worktree_path.as_ref();
 
-    if !force && has_uncommitted_changes(wt)? {
+    if !force && has_uncommitted_changes(host, wt)? {
         return Err(GitError::DirtyWorktree);
     }
 
@@ -99,12 +103,13 @@ pub fn remove(
         args.push("--force");
     }
     args.push(&path_str);
-    run_git(repo, &args)?;
+    run_git(host, repo, &args)?;
     Ok(())
 }
 
 /// 锁定 worktree(防止被 prune / 误删)。agent 运行期间应加锁。
 pub fn lock(
+    host: &dyn Host,
     repo: impl AsRef<Path>,
     worktree_path: impl AsRef<Path>,
     reason: Option<&str>,
@@ -115,21 +120,25 @@ pub fn lock(
         args.extend(["--reason", r]);
     }
     args.push(&path_str);
-    run_git(repo.as_ref(), &args)?;
+    run_git(host, repo.as_ref(), &args)?;
     Ok(())
 }
 
 /// 解锁 worktree。
-pub fn unlock(repo: impl AsRef<Path>, worktree_path: impl AsRef<Path>) -> Result<(), GitError> {
+pub fn unlock(
+    host: &dyn Host,
+    repo: impl AsRef<Path>,
+    worktree_path: impl AsRef<Path>,
+) -> Result<(), GitError> {
     let path_str = worktree_path.as_ref().to_string_lossy();
-    run_git(repo.as_ref(), &["worktree", "unlock", &path_str])?;
+    run_git(host, repo.as_ref(), &["worktree", "unlock", &path_str])?;
     Ok(())
 }
 
 /// 检测仓库是否使用 submodule。worktree 对 submodule 支持弱,
 /// UI 层应据此给降级提示(不假装完全支持)。
-pub fn uses_submodules(repo: impl AsRef<Path>) -> bool {
-    repo.as_ref().join(".gitmodules").is_file()
+pub fn uses_submodules(host: &dyn Host, repo: impl AsRef<Path>) -> bool {
+    host.exists(&repo.as_ref().join(".gitmodules"))
 }
 
 /// 从任意子目录解析出**主仓库工作树根**(`git rev-parse --show-toplevel`)。
@@ -137,23 +146,23 @@ pub fn uses_submodules(repo: impl AsRef<Path>) -> bool {
 /// 注意:在 worktree 内运行时,`--show-toplevel` 返回的是该 worktree 的根,
 /// 不是主仓。要拿主仓根用 [`main_worktree_root`]。这里用于"从项目任意子目录
 /// 启动也能定位仓库",而不是盲信当前目录。
-pub fn toplevel(dir: impl AsRef<Path>) -> Option<PathBuf> {
-    run_git(dir.as_ref(), &["rev-parse", "--show-toplevel"])
+pub fn toplevel(host: &dyn Host, dir: impl AsRef<Path>) -> Option<PathBuf> {
+    run_git(host, dir.as_ref(), &["rev-parse", "--show-toplevel"])
         .ok()
         .map(|s| PathBuf::from(s.trim()))
 }
 
 /// 解析出**主仓库**根(不是当前 worktree 根)。用 `git worktree list` 的第一条
 /// (git 保证第一条是主工作树)。从子目录/worktree 内启动都能拿到正确主仓。
-pub fn main_worktree_root(dir: impl AsRef<Path>) -> Option<PathBuf> {
-    let list = list_worktrees(dir.as_ref()).ok()?;
+pub fn main_worktree_root(host: &dyn Host, dir: impl AsRef<Path>) -> Option<PathBuf> {
+    let list = list_worktrees(host, dir.as_ref()).ok()?;
     list.into_iter().next().map(|e| e.path)
 }
 
 /// 某本地分支是否已存在(含被 worktree 删除后残留的孤儿分支)。
-pub fn branch_exists(repo: impl AsRef<Path>, branch: &str) -> bool {
+pub fn branch_exists(host: &dyn Host, repo: impl AsRef<Path>, branch: &str) -> bool {
     // `git branch --list <name>` 存在则输出该分支行,否则空。
-    run_git(repo.as_ref(), &["branch", "--list", branch])
+    run_git(host, repo.as_ref(), &["branch", "--list", branch])
         .map(|out| !out.trim().is_empty())
         .unwrap_or(false)
 }
@@ -212,8 +221,8 @@ const NATURE: &[&str] = &[
 ];
 
 /// 便捷:清理已被手动删除但元数据残留的 worktree 记录。
-pub fn prune(repo: impl AsRef<Path>) -> Result<(), GitError> {
-    run_git(repo.as_ref(), &["worktree", "prune"])?;
+pub fn prune(host: &dyn Host, repo: impl AsRef<Path>) -> Result<(), GitError> {
+    run_git(host, repo.as_ref(), &["worktree", "prune"])?;
     Ok(())
 }
 

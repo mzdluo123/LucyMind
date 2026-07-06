@@ -170,11 +170,12 @@ impl WorkspaceView {
         let alias = self.config.alias.get(&branch).cloned();
         let label = alias.clone().unwrap_or_else(|| branch.clone());
         let ours = self.is_ours(&wt.path);
-        let is_main = self.is_main_repo(&wt.path);
-        let is_active = self
-            .active
-            .as_deref()
-            .is_some_and(|a| super::same_path(a, &wt.path));
+        // render 路径直接用 PathBuf 比较(不调 canon/same_path):
+        // set_repo/refresh_worktrees 已预规范化 worktrees 的 path,
+        // self.repo / self.active 也已是规范化路径。
+        // 若改回调 canon,WslHost 下每帧 spawn wsl.exe → UI 卡死。
+        let is_main = self.repo.as_deref().is_some_and(|r| wt.path == r);
+        let is_active = self.active.as_deref().is_some_and(|a| a == wt.path);
         let wt_path_for_click = wt.path.clone();
 
         // 除主仓外都可点(切换/打开)、可关。

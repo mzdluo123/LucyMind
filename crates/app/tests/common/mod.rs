@@ -11,11 +11,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
 
 use lucy_app::workspace::WorkspaceView;
+use lucy_core::host::Host;
 
 /// 建一个带初始提交(`main` 分支)的临时 git 仓库,返回 (tempdir, repo_path)。
 /// tempdir 析构时自动清理。
@@ -69,19 +71,25 @@ pub fn build_workspace(
     cx: &mut TestAppContext,
     candidate: Option<PathBuf>,
 ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+    build_workspace_with_host(cx, candidate, Arc::new(lucy_core::host::LocalHost))
+}
+
+/// 同 [`build_workspace`],但接收自定义 Host(如 `WslHost` 或 `MockHost`)。
+pub fn build_workspace_with_host(
+    cx: &mut TestAppContext,
+    candidate: Option<PathBuf>,
+    host: Arc<dyn Host>,
+) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
     let registry_dir = tempfile::tempdir().expect("registry tempdir");
     let registry_path = registry_dir.path().join("sessions.json");
     // tempdir 析构清理,但 Entity 可能比 tempdir 活更久 —— 把路径记下,
     // 测试结束 shutdown_workspace 后手动删即可。
     let (workspace, window) = cx.add_window_view(|_window, cx| {
         gpui_component::init(cx);
-        let mut v = WorkspaceView::new_for_test(cx, candidate);
+        let mut v = WorkspaceView::new_for_test_with_host(cx, candidate, host.clone());
         v.set_registry_path_for_test(registry_path);
         v
     });
-    // leak registry_dir —— 它在测试结束才需要清理(tempdir 析构)。
-    // 但 add_window_view 借了 cx,无法在这里返回 tempdir。
-    // 测试自己造 registry tempdir 不现实(无法注入);用进程级 temp 即可。
     std::mem::forget(registry_dir);
     (workspace, window)
 }

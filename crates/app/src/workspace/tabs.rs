@@ -240,22 +240,24 @@ impl WorkspaceView {
             .child(new_tab_header)
             .child(default_item);
 
-        // Windows 专属 shell 选项。
+        // Windows 专属 shell 选项(仅在本地模式显示;WSL 模式下只有 Default)。
         #[cfg(windows)]
         {
-            card = card
-                .child(self.menu_item("Command Prompt", None, cx, |this, cx| {
-                    this.new_terminal_tab(ShellKind::Cmd, cx);
-                    this.launcher_menu_open = false;
-                }))
-                .child(self.menu_item("PowerShell", None, cx, |this, cx| {
-                    this.new_terminal_tab(ShellKind::PowerShell, cx);
-                    this.launcher_menu_open = false;
-                }))
-                .child(self.menu_item("PowerShell 7", None, cx, |this, cx| {
-                    this.new_terminal_tab(ShellKind::Pwsh, cx);
-                    this.launcher_menu_open = false;
-                }));
+            if !self.host.is_remote() {
+                card = card
+                    .child(self.menu_item("Command Prompt", None, cx, |this, cx| {
+                        this.new_terminal_tab(ShellKind::Cmd, cx);
+                        this.launcher_menu_open = false;
+                    }))
+                    .child(self.menu_item("PowerShell", None, cx, |this, cx| {
+                        this.new_terminal_tab(ShellKind::PowerShell, cx);
+                        this.launcher_menu_open = false;
+                    }))
+                    .child(self.menu_item("PowerShell 7", None, cx, |this, cx| {
+                        this.new_terminal_tab(ShellKind::Pwsh, cx);
+                        this.launcher_menu_open = false;
+                    }));
+            }
         }
 
         // 分隔线。
