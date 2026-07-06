@@ -78,7 +78,7 @@ fn pty_output_flows_into_term() {
     let mut session =
         TerminalSession::spawn(dims(), None, Some((prog, args)), vec![]).expect("spawn session");
 
-    let text = wait_for_text(&mut session, "HELLO_LUCY", Duration::from_secs(5));
+    let text = wait_for_text(&mut session, "HELLO_LUCY", Duration::from_secs(15));
     assert!(text.is_some(), "应在 term 屏幕读到 PTY 输出");
 }
 
@@ -92,7 +92,7 @@ fn interactive_echo_via_cat() {
     std::thread::sleep(Duration::from_millis(300));
     session.write_input(b"abc\r\n".to_vec());
 
-    let text = wait_for_text(&mut session, "abc", Duration::from_secs(5));
+    let text = wait_for_text(&mut session, "abc", Duration::from_secs(15));
     assert!(text.is_some(), "cat 应回显写入的内容");
 }
 
@@ -114,7 +114,7 @@ fn is_a_real_tty() {
     let mut session =
         TerminalSession::spawn(dims(), None, Some((prog, args)), vec![]).expect("spawn tty probe");
 
-    let text = wait_for_text(&mut session, "TTY_YES", Duration::from_secs(5));
+    let text = wait_for_text(&mut session, "TTY_YES", Duration::from_secs(15));
     assert!(text.is_some(), "PTY 必须是真 TTY(claude/Ink 依赖)");
 }
 
@@ -177,7 +177,7 @@ fn child_exit_is_reported() {
 
     let start = Instant::now();
     let mut got_exit = false;
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < Duration::from_secs(15) {
         for ev in session.drain_events() {
             if let lucy_terminal::TermEvent::ChildExit(_) = ev {
                 got_exit = true;

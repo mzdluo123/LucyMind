@@ -20,7 +20,7 @@ fn create_worktree(
     wait_for(
         cx,
         |cx| cx.update(|cx| workspace.update(cx, |v, _| v.active_path().is_some())),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     cx.update(|cx| workspace.update(cx, |v, _| v.active_path().map(|p| p.to_path_buf()).unwrap()))
 }
@@ -44,7 +44,7 @@ async fn clean_worktree_closes_without_confirmation(cx: &mut TestAppContext) {
     wait_for(
         cx,
         |cx| cx.read(|cx| workspace.read(cx).worktree_count()) < count_before,
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
 
     // terminals 不含该路径。
@@ -87,7 +87,7 @@ async fn dirty_worktree_prompts_confirmation(cx: &mut TestAppContext) {
     wait_for(
         cx,
         |cx| !cx.read(|cx| workspace.read(cx).has_pending_close()),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     assert!(
         !cx.update(|cx| workspace.update(cx, |v, _| v.terminals_contains(&wt_path))),

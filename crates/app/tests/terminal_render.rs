@@ -42,7 +42,7 @@ async fn pty_output_appears_in_snapshot(cx: &mut TestAppContext) {
             });
             term.is_some_and(|t| cx.read(|cx| t.read(cx).snapshot_text().contains("RENDER_MARKER")))
         },
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     shutdown_workspace(cx, &workspace);

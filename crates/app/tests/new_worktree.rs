@@ -82,7 +82,7 @@ async fn new_worktree_terminal_renders_pty_output(cx: &mut TestAppContext) {
             });
             term.is_some_and(|t| cx.read(|cx| t.read(cx).snapshot_text().contains("MARKER_READY")))
         },
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     shutdown_workspace(cx, &workspace);

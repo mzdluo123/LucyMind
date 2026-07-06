@@ -88,6 +88,13 @@ pub fn build_workspace(
 
 /// 轮询直到谓词成立或超时。每次循环 `run_until_parked` 排空异步任务
 /// (git/PTY/cx.spawn),让后台操作完成后再检查谓词。
+///
+/// `run_until_parked` 只排空**已就绪**任务;PTY 的 16ms 轮询 timer 在 sleep
+/// 期间未就绪,会立即返回。故循环里显式 sleep 让 timer 触发,下一轮
+/// `run_until_parked` 才能排空 PTY 事件 + 刷新 snapshot。
+///
+/// - sleep 20ms 略大于 PTY 的 16ms 周期,避免错相位导致轮空。
+/// - 默认超时 30s:CI 机器负载高时 PTY 子进程 spawn + 首次输出可能 >10s。
 pub fn wait_for<F>(cx: &mut TestAppContext, mut predicate: F, timeout: Duration)
 where
     F: FnMut(&mut TestAppContext) -> bool,
@@ -102,7 +109,7 @@ where
             panic!("wait_for timed out after {timeout:?} (predicate never held)");
         }
         // 让 PTY 轮询(16ms)和其他定时器有机会推进。
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
