@@ -8,6 +8,8 @@
 
 pub mod button;
 pub mod dialog;
+pub mod path_picker;
 
 pub use button::{button, ButtonVariant};
 pub use dialog::{button_row, modal};
+pub use path_picker::{PathPicker, PathPickerEvent};

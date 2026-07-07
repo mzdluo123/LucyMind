@@ -74,8 +74,8 @@ pub fn run() {
                 move |window, cx| {
                     // 把根视图包进 gpui-component 的 Root —— 它的 Input/弹层/焦点管理
                     // 依赖 Root 提供的全局上下文,否则渲染/聚焦 Input 会 panic。
-                    let workspace =
-                        cx.new(|cx| WorkspaceView::new(cx, candidate.clone(), host.clone()));
+                    let workspace = cx
+                        .new(|cx| WorkspaceView::new(window, cx, candidate.clone(), host.clone()));
                     let view: gpui::AnyView = workspace.into();
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
                 },

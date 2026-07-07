@@ -1,7 +1,7 @@
-//! WSL Host UI 状态测试:
+//! WSL/Remote Host UI 状态测试:
 //! - 13.1: LocalHost 构造 `WorkspaceView`,`is_remote_host()` 返回 false。
 //! - 13.2: RemoteMockHost(is_remote=true) 构造时 launcher menu 状态正确。
-//! - 13.3: `open_repo_picker` 弹选择弹窗;`open_wsl_browser` 切换 WslHost + 打开浏览器。
+//! - 13.3: `open_repo_picker` 弹出 PathPicker(而非旧的 choice dialog / WSL browser)。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -55,96 +55,64 @@ async fn remote_host_launcher_menu_state(cx: &mut TestAppContext) {
     shutdown_workspace(cx, &workspace);
 }
 
-/// 13.3: `open_repo_picker` 弹出选择弹窗(open_repo_choice_open = true)。
-/// `open_wsl_browser` 切换 WslHost + 打开文件浏览器。
+/// 13.3: `open_repo_picker` 弹出 PathPicker(path_picker_open = true)。
+/// 旧的 choice dialog / WSL browser 已被 PathPicker 替代。
 #[gpui::test]
-async fn open_repo_picker_shows_choice_dialog(cx: &mut TestAppContext) {
+async fn open_repo_picker_shows_path_picker(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo();
-    let (workspace, _w) = build_workspace(cx, Some(repo));
-    cx.run_until_parked();
+    let (workspace, window) = build_workspace(cx, Some(repo));
+    window.run_until_parked();
 
-    // 初始:选择弹窗未打开。
-    let choice_open = cx.update(|cx| workspace.update(cx, |v, _| v.open_repo_choice_open()));
-    assert!(!choice_open, "choice dialog should not be open initially");
+    // 初始:PathPicker 未打开。
+    let picker_open =
+        window.update(|_window, cx| workspace.update(cx, |v, _| v.path_picker_open()));
+    assert!(!picker_open, "PathPicker should not be open initially");
 
-    // 触发 open_repo_picker → 设 open_repo_choice_open = true。
-    cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.open_repo_picker_for_test(cx));
+    // 触发 open_repo_picker → path_picker_open = true。
+    window.update(|window, cx| {
+        workspace.update(cx, |v, cx| v.open_repo_picker_for_test(window, cx));
     });
 
-    let choice_open = cx.update(|cx| workspace.update(cx, |v, _| v.open_repo_choice_open()));
+    let picker_open =
+        window.update(|_window, cx| workspace.update(cx, |v, _| v.path_picker_open()));
     assert!(
-        choice_open,
-        "choice dialog should be open after open_repo_picker"
+        picker_open,
+        "PathPicker should be open after open_repo_picker"
     );
 
-    // WSL 浏览器仍未打开(需要用户先选 WSL)。
-    let wsl_open = cx.update(|cx| workspace.update(cx, |v, _| v.wsl_browser_open()));
-    assert!(
-        !wsl_open,
-        "WSL browser should not be open until user picks WSL"
-    );
-
-    shutdown_workspace(cx, &workspace);
+    shutdown_workspace(window, &workspace);
 }
 
-/// 13.3: `open_wsl_browser` 切换到 WslHost 并打开 WSL 文件浏览器。
+/// 13.3 (远程 Host): RemoteMockHost 构造时,open_repo_picker 同样弹出 PathPicker。
+/// 验证 PathPicker 对远程 Host(is_remote=true)也能正常创建。
 #[gpui::test]
-async fn open_wsl_browser_switches_host_and_opens_browser(cx: &mut TestAppContext) {
+async fn remote_host_open_repo_picker(cx: &mut TestAppContext) {
+    let host: std::sync::Arc<dyn Host> = std::sync::Arc::new(RemoteMockHost::new());
     let (_dir, repo) = temp_repo();
-    let (workspace, _w) = build_workspace(cx, Some(repo));
-    cx.run_until_parked();
+    let (workspace, window) = build_workspace_with_host(cx, Some(repo), host);
+    window.run_until_parked();
 
-    // 初始:LocalHost,is_remote = false。
-    let is_remote_before = cx.update(|cx| workspace.update(cx, |v, _| v.is_remote_host()));
-    assert!(!is_remote_before, "should start as LocalHost");
+    let is_remote = window.update(|_window, cx| workspace.update(cx, |v, _| v.is_remote_host()));
+    assert!(is_remote, "RemoteMockHost should be remote");
 
-    // 触发 open_wsl_browser → 切换到 WslHost + 打开浏览器。
-    cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.open_wsl_browser_for_test(cx));
+    // 初始:PathPicker 未打开。
+    let picker_open =
+        window.update(|_window, cx| workspace.update(cx, |v, _| v.path_picker_open()));
+    assert!(!picker_open, "PathPicker should not be open initially");
+
+    // 触发 open_repo_picker → path_picker_open = true(远程 Host 也能正常弹)。
+    window.update(|window, cx| {
+        workspace.update(cx, |v, cx| v.open_repo_picker_for_test(window, cx));
     });
 
-    let is_remote_after = cx.update(|cx| workspace.update(cx, |v, _| v.is_remote_host()));
-    assert!(is_remote_after, "should switch to WslHost");
-
-    let wsl_open = cx.update(|cx| workspace.update(cx, |v, _| v.wsl_browser_open()));
+    let picker_open =
+        window.update(|_window, cx| workspace.update(cx, |v, _| v.path_picker_open()));
     assert!(
-        wsl_open,
-        "WSL browser should be open after open_wsl_browser"
+        picker_open,
+        "PathPicker should be open after open_repo_picker (remote host)"
     );
 
-    shutdown_workspace(cx, &workspace);
-}
-
-/// 13.3 (反向): LocalHost 的 WSL 浏览器初始未打开,
-/// `open_repo_picker` 弹选择弹窗(不直接弹 WSL 浏览器)。
-#[gpui::test]
-async fn local_host_wsl_dialog_not_open(cx: &mut TestAppContext) {
-    let (_dir, repo) = temp_repo();
-    let (workspace, _w) = build_workspace(cx, Some(repo));
-    cx.run_until_parked();
-
-    let is_remote = cx.update(|cx| workspace.update(cx, |v, _| v.is_remote_host()));
-    assert!(!is_remote, "LocalHost should not be remote");
-
-    let wsl_open = cx.update(|cx| workspace.update(cx, |v, _| v.wsl_browser_open()));
-    assert!(!wsl_open, "WSL browser should not be open initially");
-
-    // open_repo_picker 弹选择弹窗,不直接弹 WSL 浏览器。
-    cx.update(|cx| {
-        workspace.update(cx, |v, cx| v.open_repo_picker_for_test(cx));
-    });
-
-    let choice_open = cx.update(|cx| workspace.update(cx, |v, _| v.open_repo_choice_open()));
-    assert!(choice_open, "choice dialog should be open");
-
-    let wsl_open = cx.update(|cx| workspace.update(cx, |v, _| v.wsl_browser_open()));
-    assert!(
-        !wsl_open,
-        "WSL browser should not be open (user hasn't picked WSL yet)"
-    );
-
-    shutdown_workspace(cx, &workspace);
+    shutdown_workspace(window, &workspace);
 }
 
 // ---- 辅助:is_remote=true 的 MockHost(不依赖 #[cfg(test)] 的 MockHost) ----

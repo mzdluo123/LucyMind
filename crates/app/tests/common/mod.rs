@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
 use lucy_app::workspace::WorkspaceView;
 use lucy_core::host::Host;
@@ -62,10 +62,11 @@ fn git_run(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {repo:?}");
 }
 
-/// 构造一个 headless `WorkspaceView`(包在窗口里),用给定候选仓库路径初始化。
+/// 构造一个 headless `WorkspaceView`(包在 `gpui_component::Root` 里),用给定候选仓库路径初始化。
 ///
 /// 用 `new_for_test`(不弹 `open_repo_picker` —— TestPlatform 未实现
-/// `prompt_for_paths`)。`gpui_component::init` 复刻 main.rs 启动序列。
+/// `prompt_for_paths`)。`gpui_component::init` + `Root` 包裹复刻 main.rs 启动序列,
+/// 让 `InputState` 等 gpui-component 组件能正常工作(Root::read 不会 panic)。
 /// registry 持久化路径隔离到 tempdir,避免污染真实用户 session。
 pub fn build_workspace(
     cx: &mut TestAppContext,
@@ -84,11 +85,18 @@ pub fn build_workspace_with_host(
     let registry_path = registry_dir.path().join("sessions.json");
     // tempdir 析构清理,但 Entity 可能比 tempdir 活更久 —— 把路径记下,
     // 测试结束 shutdown_workspace 后手动删即可。
-    let (workspace, window) = cx.add_window_view(|_window, cx| {
-        gpui_component::init(cx);
+    //
+    // 先创建 WorkspaceView entity(不弹 open_repo_picker),再用 Root 包裹作为
+    // 窗口根视图。Root 是 gpui-component InputState/Dialog 等组件的全局上下文,
+    // 不包会导致 Root::read panic(见 path_picker 的 InputState::new)。
+    let workspace = cx.new(|cx| {
         let mut v = WorkspaceView::new_for_test_with_host(cx, candidate, host.clone());
         v.set_registry_path_for_test(registry_path);
         v
+    });
+    let (_root, window) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        gpui_component::Root::new(workspace.clone(), window, cx)
     });
     std::mem::forget(registry_dir);
     (workspace, window)

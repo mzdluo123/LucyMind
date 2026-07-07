@@ -29,6 +29,7 @@ use lucy_core::agent::AgentSpec;
 use lucy_core::config::{self, WorktreeConfig};
 use lucy_core::git::{self, CreateMode, WorktreeEntry};
 use lucy_core::hooks::{self, HookContext, LifecycleEvent};
+#[cfg(feature = "test-support")]
 use lucy_core::host::LocalHost;
 use lucy_core::host::{Host, HostCommand};
 use lucy_core::session::{self, Registry, Session};
@@ -170,21 +171,6 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
-/// WSL 文件浏览器状态(打开时显示目录树选择器)。
-///
-/// `current_dir` = 当前浏览的目录;`entries` = 该目录的条目列表;
-/// `loading` = 后台 `list_dir` 进行中;`error` = 加载失败信息。
-struct WslBrowser {
-    /// 当前浏览的目录(WSL Linux 路径,如 `/home/user`)。
-    current_dir: PathBuf,
-    /// 当前目录的条目列表(加载完成后填充)。
-    entries: Vec<lucy_core::host::DirEntry>,
-    /// 加载失败时的错误信息(None = 无错误或加载中)。
-    error: Option<String>,
-    /// 是否正在加载(后台 list_dir 进行中)。
-    loading: bool,
-}
-
 pub struct WorkspaceView {
     /// 当前仓库根。None = 尚未选仓库(显示 pick a directory 空态)。
     repo: Option<PathBuf>,
@@ -213,11 +199,9 @@ pub struct WorkspaceView {
     settings: Option<SettingsForm>,
     /// launcher 菜单(`+` 按钮下拉)是否打开。
     launcher_menu_open: bool,
-    /// 打开仓库选择弹窗(Local / WSL 二选一)是否打开。
-    open_repo_choice_open: bool,
-    /// WSL 文件浏览器状态(Some = 浏览器打开中)。
-    /// 用户在 WSL 文件系统中导航目录树,选一个目录作为 git 仓库根。
-    wsl_browser: Option<WslBrowser>,
+    /// 路径输入选择器(Some = 打开中)。Zed 风格:文本输入 + 实时目录补全。
+    /// 替代旧的 open_repo_choice_dialog + wsl_browser_dialog,统一本地/WSL 入口。
+    path_picker: Option<gpui::Entity<crate::ui::PathPicker>>,
     focus: FocusHandle,
     /// 测试用:覆盖 registry 持久化路径(None = 用默认路径 `~/Library/...`)。
     /// 测试设为 tempdir,避免污染真实用户的 session 注册表。
@@ -233,14 +217,19 @@ const SIDEBAR_DEFAULT_W: f32 = 248.0;
 impl WorkspaceView {
     /// 启动:给一个候选仓库路径(通常来自 cwd)。若它是有效 git 仓库则用,
     /// 否则以空态启动并自动弹目录选择器(.app 双击启动时 cwd 不是仓库的场景)。
-    pub fn new(cx: &mut Context<Self>, candidate: Option<PathBuf>, host: Arc<dyn Host>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        candidate: Option<PathBuf>,
+        host: Arc<dyn Host>,
+    ) -> Self {
         let mut this = Self::construct(cx, host);
         let repo = candidate
             .as_ref()
             .and_then(|c| lucy_core::git::main_worktree_root(this.host.as_ref(), c));
         match repo {
             Some(r) => this.set_repo(r),
-            None => this.open_repo_picker(cx), // 无有效仓库 → 启动即弹目录选择器
+            None => this.open_repo_picker(window, cx), // 无有效仓库 → 启动即弹目录选择器
         }
         this
     }
@@ -289,8 +278,7 @@ impl WorkspaceView {
             alias_input: None,
             settings: None,
             launcher_menu_open: false,
-            open_repo_choice_open: false,
-            wsl_browser: None,
+            path_picker: None,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
             registry_path: None,
@@ -308,120 +296,85 @@ impl WorkspaceView {
         self.worktrees = self.list_worktrees_canon();
     }
 
-    /// 弹出「打开仓库」选择弹窗:用户选 Local(系统文件选择器)或 WSL(路径输入)。
-    /// 选中后切换 Host 并打开仓库。
-    fn open_repo_picker(&mut self, _cx: &mut Context<Self>) {
-        self.open_repo_choice_open = true;
+    /// 弹出 Zed 风格的路径输入选择器(PathPicker):文本输入 + 实时目录补全。
+    /// 统一本地/WSL 入口,用当前 Host 的 list_dir 列目录。
+    fn open_repo_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::PathPickerEvent;
+
+        let host = self.host.clone();
+        // 初始查询:已有仓库 → 仓库路径;WSL → `/`;本地 → home 或当前目录。
+        let initial = self
+            .repo
+            .as_ref()
+            .map(|r| {
+                let s = r.to_string_lossy().into_owned();
+                if !s.ends_with(std::path::MAIN_SEPARATOR) && !s.ends_with('/') {
+                    format!("{s}{}", std::path::MAIN_SEPARATOR)
+                } else {
+                    s
+                }
+            })
+            .unwrap_or_else(|| {
+                if host.is_remote() {
+                    "/".to_string()
+                } else {
+                    // 本地模式:home 目录或当前目录。
+                    std::env::var("HOME")
+                        .or_else(|_| std::env::var("USERPROFILE"))
+                        .map(|h| {
+                            if h.ends_with(std::path::MAIN_SEPARATOR) {
+                                h
+                            } else {
+                                format!("{h}{}", std::path::MAIN_SEPARATOR)
+                            }
+                        })
+                        .unwrap_or_else(|_| ".".to_string())
+                }
+            });
+
+        let picker = cx.new(|cx| crate::ui::PathPicker::new(host, initial, window, cx));
+
+        // 订阅 PathPicker 事件。
+        cx.subscribe(
+            &picker,
+            |this: &mut Self,
+             picker: gpui::Entity<crate::ui::PathPicker>,
+             event: &crate::ui::PathPickerEvent,
+             cx: &mut Context<Self>| {
+                match event {
+                    PathPickerEvent::Confirmed(path) => {
+                        // 验证是 git 仓库 → set_repo;失败 → 在 PathPicker 内显示错误。
+                        match lucy_core::git::main_worktree_root(this.host.as_ref(), path) {
+                            Some(root) => {
+                                this.set_repo(root);
+                                this.path_picker = None;
+                                this.set_status("已打开仓库", false);
+                            }
+                            None => {
+                                picker.update(cx, |p, cx| {
+                                    p.set_error("所选目录不是 git 仓库", cx);
+                                });
+                            }
+                        }
+                        cx.notify();
+                    }
+                    PathPickerEvent::Dismissed => {
+                        this.path_picker = None;
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
+
+        self.path_picker = Some(picker);
+        cx.notify();
     }
 
     /// 切换 Host(LocalHost / WslHost)。打开新仓库前调用。
+    #[allow(dead_code)]
     fn set_host(&mut self, host: Arc<dyn Host>) {
         self.host = host;
-    }
-
-    /// 用系统文件选择器打开本地仓库(LocalHost 模式)。
-    fn open_local_picker(&mut self, cx: &mut Context<Self>) {
-        self.set_host(Arc::new(LocalHost));
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open Git repository".into()),
-        });
-        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(dir) = paths.into_iter().next() {
-                    let _ = this.update(cx, |view, cx| {
-                        // 解析成主仓根(选的可能是仓库内子目录)。
-                        match lucy_core::git::main_worktree_root(view.host.as_ref(), &dir) {
-                            Some(root) => {
-                                view.set_repo(root);
-                                view.set_status("已打开仓库", false);
-                            }
-                            None => view.set_status("所选目录不是 git 仓库", true),
-                        }
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// 打开 WSL 文件浏览器(切换到 WslHost,从根目录开始浏览)。
-    /// 替代旧的文本输入弹窗:用户在目录树中导航选仓库,不用手动输入路径。
-    fn open_wsl_browser(&mut self, cx: &mut Context<Self>) {
-        self.set_host(Arc::new(lucy_core::host::WslHost::default()));
-        let initial = PathBuf::from("/");
-        self.wsl_browser = Some(WslBrowser {
-            current_dir: initial.clone(),
-            entries: Vec::new(),
-            error: None,
-            loading: true,
-        });
-        self.load_wsl_dir(initial, cx);
-        cx.notify();
-    }
-
-    /// 后台加载目录条目(不阻塞 UI 线程;WSL 的 `wsl.exe ls` 可能要 1-2 秒)。
-    fn load_wsl_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        let host = self.host.clone();
-        if let Some(b) = &mut self.wsl_browser {
-            b.current_dir = dir.clone();
-            b.loading = true;
-            b.error = None;
-            b.entries.clear();
-        }
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { host.list_dir(&dir) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                if let Some(b) = &mut view.wsl_browser {
-                    b.loading = false;
-                    match result {
-                        Ok(entries) => b.entries = entries,
-                        Err(e) => b.error = Some(format!("{e}")),
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 在 WSL 浏览器中导航到子目录(或 `..` 返回上级)。
-    fn navigate_wsl_dir(&mut self, name: String, cx: &mut Context<Self>) {
-        let Some(b) = &self.wsl_browser else {
-            return;
-        };
-        let new_dir = if name == ".." {
-            b.current_dir
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| b.current_dir.clone())
-        } else {
-            b.current_dir.join(&name)
-        };
-        self.load_wsl_dir(new_dir, cx);
-    }
-
-    /// 确认选择当前目录作为仓库根:验证是 git 仓库后 set_repo。
-    fn commit_wsl_browser(&mut self, cx: &mut Context<Self>) {
-        let Some(b) = &self.wsl_browser else {
-            return;
-        };
-        let path = b.current_dir.clone();
-        match git::main_worktree_root(self.host.as_ref(), &path) {
-            Some(root) => {
-                self.set_repo(root);
-                self.wsl_browser = None;
-                self.set_status("已打开仓库", false);
-            }
-            None => self.set_status("所选目录不是 git 仓库", true),
-        }
-        cx.notify();
     }
 
     /// 该 worktree 是否由本工具建(据注册表)—— 仅用于 ●/· 标记,不作操作门槛。
@@ -1162,53 +1115,22 @@ impl WorkspaceView {
         self.host.is_remote()
     }
 
-    /// WSL 文件浏览器是否打开。
+    /// 路径选择器是否打开。
     #[cfg(feature = "test-support")]
-    pub fn wsl_browser_open(&self) -> bool {
-        self.wsl_browser.is_some()
+    pub fn path_picker_open(&self) -> bool {
+        self.path_picker.is_some()
     }
 
     /// 直接触发 open_repo_picker(测试绕过 UI 点击)。
     #[cfg(feature = "test-support")]
-    pub fn open_repo_picker_for_test(&mut self, cx: &mut Context<Self>) {
-        self.open_repo_picker(cx);
+    pub fn open_repo_picker_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_repo_picker(window, cx);
     }
 
-    /// 打开仓库选择弹窗是否打开。
+    /// 取路径选择器 Entity(测试用,验证状态)。
     #[cfg(feature = "test-support")]
-    pub fn open_repo_choice_open(&self) -> bool {
-        self.open_repo_choice_open
-    }
-
-    /// 直接触发 open_wsl_browser(测试绕过 UI 点击)。
-    /// 切换到 WslHost 并打开 WSL 文件浏览器。
-    #[cfg(feature = "test-support")]
-    pub fn open_wsl_browser_for_test(&mut self, cx: &mut Context<Self>) {
-        self.open_wsl_browser(cx);
-    }
-
-    /// 直接触发 open_local_picker(测试绕过 UI 点击)。
-    /// 注意:会调用 prompt_for_paths,TestPlatform 未实现会 panic。
-    #[cfg(feature = "test-support")]
-    pub fn open_local_picker_for_test(&mut self, cx: &mut Context<Self>) {
-        self.open_local_picker(cx);
-    }
-
-    /// 直接提交 WSL 浏览器当前目录(测试绕过 UI 点击)。
-    #[cfg(feature = "test-support")]
-    pub fn commit_wsl_browser_for_test(&mut self, cx: &mut Context<Self>) {
-        self.commit_wsl_browser(cx);
-    }
-
-    /// 设置 WSL 浏览器当前目录(测试注入,不通过 UI 导航)。
-    #[cfg(feature = "test-support")]
-    pub fn set_wsl_browser_dir_for_test(&mut self, dir: PathBuf) {
-        if let Some(b) = &mut self.wsl_browser {
-            b.current_dir = dir;
-            b.loading = false;
-            b.error = None;
-            b.entries.clear();
-        }
+    pub fn path_picker_for_test(&self) -> Option<&gpui::Entity<crate::ui::PathPicker>> {
+        self.path_picker.as_ref()
     }
 }
 
@@ -1314,16 +1236,8 @@ impl Render for WorkspaceView {
                     cx.notify();
                     cx.stop_propagation();
                 }
-                if this.wsl_browser.is_some() && ev.keystroke.key == "escape" {
-                    this.wsl_browser = None;
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                if this.open_repo_choice_open && ev.keystroke.key == "escape" {
-                    this.open_repo_choice_open = false;
-                    cx.notify();
-                    cx.stop_propagation();
-                }
+                // PathPicker 自己处理 Esc(on_key_down 在卡片层捕获),
+                // 这里不需要额外处理(path_picker 的 overlay 会 stop_propagation)。
             }))
             .child(self.sidebar(cx))
             .child(splitter)
@@ -1341,13 +1255,9 @@ impl Render for WorkspaceView {
         if self.settings.is_some() {
             root = root.child(self.settings_dialog(cx));
         }
-        // 打开仓库选择弹窗(Local / WSL)打开中 → 叠加选择模态。
-        if self.open_repo_choice_open {
-            root = root.child(self.open_repo_choice_dialog(cx));
-        }
-        // WSL 文件浏览器打开中 → 叠加浏览器模态。
-        if self.wsl_browser.is_some() {
-            root = root.child(self.wsl_browser_dialog(cx));
+        // 路径输入选择器打开中 → 叠加 PathPicker 模态。
+        if let Some(picker) = &self.path_picker {
+            root = root.child(picker.clone());
         }
         // launcher 菜单(`+` 按钮下拉)打开中 → 叠加菜单 overlay。
         if self.launcher_menu_open {

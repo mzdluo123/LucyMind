@@ -83,8 +83,8 @@ impl WorkspaceView {
                                 .text_color(rgb(theme::TEXT_FAINT))
                                 .group_hover("open-repo-btn", |s| s.text_color(rgb(theme::TEXT))),
                         )
-                        .on_click(cx.listener(|this, _ev, _w, cx| {
-                            this.open_repo_picker(cx);
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.open_repo_picker(window, cx);
                         })),
                 ),
         );
