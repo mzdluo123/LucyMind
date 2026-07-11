@@ -19,6 +19,14 @@ const GIT_BRANCH_SVG: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
 const SETTINGS_SVG: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const PLUS_SVG: &[u8] = include_bytes!("../assets/icons/plus.svg");
 const FOLDER_OPEN_SVG: &[u8] = include_bytes!("../assets/icons/folder-open.svg");
+const GIT_PULL_REQUEST_SVG: &[u8] = include_bytes!("../assets/icons/git-pull-request.svg");
+const CIRCLE_CHECK_SVG: &[u8] = include_bytes!("../assets/icons/circle-check-big.svg");
+const CIRCLE_X_SVG: &[u8] = include_bytes!("../assets/icons/circle-x.svg");
+const CLOCK_SVG: &[u8] = include_bytes!("../assets/icons/clock-3.svg");
+const MESSAGE_WARNING_SVG: &[u8] = include_bytes!("../assets/icons/message-circle-warning.svg");
+const GIT_MERGE_SVG: &[u8] = include_bytes!("../assets/icons/git-merge.svg");
+const CIRCLE_DRAFT_SVG: &[u8] = include_bytes!("../assets/icons/circle-dot-dashed.svg");
+const CIRCLE_DOT_SVG: &[u8] = include_bytes!("../assets/icons/circle-dot.svg");
 const ARROW_LEFT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-left.svg");
 const ARROW_RIGHT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-right.svg");
 const ARROW_UP_SVG: &[u8] = include_bytes!("../assets/icons/arrow-up.svg");
@@ -39,6 +47,14 @@ impl AssetSource for Assets {
             "icons/settings.svg" => Some(SETTINGS_SVG),
             "icons/plus.svg" => Some(PLUS_SVG),
             "icons/folder-open.svg" => Some(FOLDER_OPEN_SVG),
+            "icons/git-pull-request.svg" => Some(GIT_PULL_REQUEST_SVG),
+            "icons/circle-check-big.svg" => Some(CIRCLE_CHECK_SVG),
+            "icons/circle-x.svg" => Some(CIRCLE_X_SVG),
+            "icons/clock-3.svg" => Some(CLOCK_SVG),
+            "icons/message-circle-warning.svg" => Some(MESSAGE_WARNING_SVG),
+            "icons/git-merge.svg" => Some(GIT_MERGE_SVG),
+            "icons/circle-dot-dashed.svg" => Some(CIRCLE_DRAFT_SVG),
+            "icons/circle-dot.svg" => Some(CIRCLE_DOT_SVG),
             "icons/arrow-left.svg" => Some(ARROW_LEFT_SVG),
             "icons/arrow-right.svg" => Some(ARROW_RIGHT_SVG),
             "icons/arrow-up.svg" => Some(ARROW_UP_SVG),
@@ -59,6 +75,14 @@ impl AssetSource for Assets {
             SharedString::from("icons/settings.svg"),
             SharedString::from("icons/plus.svg"),
             SharedString::from("icons/folder-open.svg"),
+            SharedString::from("icons/git-pull-request.svg"),
+            SharedString::from("icons/circle-check-big.svg"),
+            SharedString::from("icons/circle-x.svg"),
+            SharedString::from("icons/clock-3.svg"),
+            SharedString::from("icons/message-circle-warning.svg"),
+            SharedString::from("icons/git-merge.svg"),
+            SharedString::from("icons/circle-dot-dashed.svg"),
+            SharedString::from("icons/circle-dot.svg"),
             SharedString::from("icons/arrow-left.svg"),
             SharedString::from("icons/arrow-right.svg"),
             SharedString::from("icons/arrow-up.svg"),
