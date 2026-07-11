@@ -348,35 +348,11 @@ impl TerminalView {
             return;
         }
 
-        // 这些控制键即便带 key_char 也必须由 on_key 编码(IME 不送控制码)。
-        let is_control_key = matches!(
-            ks.key.as_str(),
-            "enter"
-                | "return"
-                | "tab"
-                | "escape"
-                | "backspace"
-                | "delete"
-                | "up"
-                | "down"
-                | "left"
-                | "right"
-                | "home"
-                | "end"
-                | "pageup"
-                | "pagedown"
-        );
-
         // 关键:可打印字符(key_char 有值、无 ctrl/alt/cmd、且不是控制键)由
         // EntityInputHandler 的 replace_text_in_range 负责送 PTY —— 这里**不能**
         // 再送,否则每个字符被送两次(on_key_down + IME commit),表现为"输入一个
         // 出来两个"。on_key 只处理 InputHandler 不碰的:功能键/方向键/Ctrl 组合/Enter。
-        let is_printable = !is_control_key
-            && ks.key_char.as_deref().is_some_and(|s| !s.is_empty())
-            && !ks.modifiers.control
-            && !ks.modifiers.alt
-            && !ks.modifiers.platform;
-        if is_printable {
+        if should_defer_to_input_handler(ks) {
             return; // 交给 IME commit 路径
         }
 
@@ -1391,6 +1367,37 @@ fn utf8_to_utf16(s: &str, utf8_off: usize) -> usize {
     u16c
 }
 
+/// 可打印文本统一交给 InputHandler commit,避免 keydown 与平台文本事件重复写 PTY。
+fn should_defer_to_input_handler(ks: &Keystroke) -> bool {
+    // 这些控制键即便带 key_char 也必须由 on_key 编码(IME 不送控制码)。
+    let is_control_key = matches!(
+        ks.key.as_str(),
+        "enter"
+            | "return"
+            | "tab"
+            | "escape"
+            | "backspace"
+            | "delete"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+    );
+
+    if is_control_key || ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform {
+        return false;
+    }
+
+    // GPUI/Windows 把 VK_SPACE 当作 immutable key,所以 KeyDown 的 key_char=None,
+    // 但 TranslateMessage 随后仍会产生 WM_CHAR 并走 InputHandler。macOS 则会在
+    // KeyDown 里直接提供 key_char=" ".两种平台都必须只走文本提交路径。
+    ks.key == "space" || ks.key_char.as_deref().is_some_and(|text| !text.is_empty())
+}
+
 /// 把 GPUI Keystroke 翻译成中性 Key/Mods,再编码成 PTY 字节。
 fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
     let mods = Mods {
@@ -1441,6 +1448,20 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_space_without_key_char_uses_input_handler() {
+        let ks = Keystroke::parse("space").unwrap();
+        assert_eq!(ks.key_char, None);
+        assert!(should_defer_to_input_handler(&ks));
+    }
+
+    #[test]
+    fn ctrl_space_stays_on_keydown_path() {
+        let ks = Keystroke::parse("ctrl-space").unwrap();
+        assert!(!should_defer_to_input_handler(&ks));
+        assert_eq!(keystroke_to_bytes(&ks), Some(vec![0]));
+    }
 
     #[test]
     fn word_boundary_alphanumeric() {
