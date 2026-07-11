@@ -140,7 +140,7 @@ impl WorkspaceView {
         let Some(repo) = self.repo.clone() else {
             return;
         };
-        let path = repo.join(".worktree.toml");
+        let path = self.host.join_path(&repo, ".worktree.toml");
         match config::set_alias(self.host.as_ref(), &path, branch, alias) {
             Ok(()) => {
                 // 重载配置(拿到新别名),刷新显示。

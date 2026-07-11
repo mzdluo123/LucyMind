@@ -115,6 +115,74 @@ async fn remote_host_open_repo_picker(cx: &mut TestAppContext) {
     shutdown_workspace(window, &workspace);
 }
 
+#[gpui::test]
+async fn remote_shell_spawn_uses_wsl_cwd_only(cx: &mut TestAppContext) {
+    let host: std::sync::Arc<dyn Host> = std::sync::Arc::new(RemoteMockHost::new());
+    let (workspace, _window) = build_workspace_with_host(cx, None, host);
+    let path = Path::new("/home/lucy/project");
+    let env = vec![("TERM".to_string(), "xterm-256color".to_string())];
+
+    let (working_directory, command, pty_env) = cx
+        .update(|cx| workspace.update(cx, |view, _| view.shell_spawn_options_for_test(path, env)));
+
+    assert_eq!(
+        working_directory, None,
+        "ConPTY must not receive a WSL path"
+    );
+    assert!(
+        pty_env.is_empty(),
+        "WSL env must cross via the command line"
+    );
+    assert_eq!(
+        command,
+        Some((
+            "wsl.exe".to_string(),
+            vec![
+                "--cd".to_string(),
+                "/home/lucy/project".to_string(),
+                "--".to_string(),
+                "env".to_string(),
+                "TERM=xterm-256color".to_string(),
+                "/bin/sh".to_string(),
+            ]
+        ))
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[cfg(target_os = "windows")]
+#[gpui::test]
+async fn local_picker_can_switch_to_wsl(cx: &mut TestAppContext) {
+    let (workspace, window) = build_workspace(cx, None);
+    window.update(|window, cx| {
+        workspace.update(cx, |view, cx| view.open_repo_picker_for_test(window, cx));
+    });
+    let picker = window
+        .update(|_window, cx| workspace.read(cx).path_picker_for_test().cloned())
+        .expect("picker should be open");
+
+    window.update(|window, cx| {
+        picker.update(cx, |picker, cx| {
+            picker.switch_location_for_test(true, window, cx)
+        });
+    });
+
+    let (remote, separator, query) = window.update(|_window, cx| {
+        let picker = picker.read(cx);
+        (
+            picker.is_remote(),
+            picker.separator_for_test(),
+            picker.query(cx),
+        )
+    });
+    assert!(remote);
+    assert_eq!(separator, '/');
+    assert_eq!(query, "/");
+
+    shutdown_workspace(window, &workspace);
+}
+
 // ---- 辅助:is_remote=true 的 MockHost(不依赖 #[cfg(test)] 的 MockHost) ----
 
 /// RemoteMockHost:内存 Host,is_remote 返回 true。
@@ -228,6 +296,14 @@ impl Host for RemoteMockHost {
         Ok(())
     }
 
+    fn join_path(&self, base: &Path, child: &str) -> PathBuf {
+        PathBuf::from(format!(
+            "{}/{}",
+            base.to_string_lossy().trim_end_matches('/'),
+            child.replace('\\', "/")
+        ))
+    }
+
     fn list_dir(&self, _path: &Path) -> Result<Vec<lucy_core::host::DirEntry>, HostError> {
         Ok(Vec::new())
     }
@@ -254,6 +330,19 @@ impl Host for RemoteMockHost {
         }
         args.push("/bin/sh".to_string());
         Some(("wsl.exe".to_string(), args))
+    }
+
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        Some((
+            "wsl.exe".to_string(),
+            vec![
+                "--cd".to_string(),
+                path.to_string_lossy().into_owned(),
+                "--".to_string(),
+                "explorer.exe".to_string(),
+                ".".to_string(),
+            ],
+        ))
     }
 
     fn is_remote(&self) -> bool {

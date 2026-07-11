@@ -107,6 +107,10 @@ impl Host for PrFixtureHost {
         self.local.shell_with_env(cwd, env)
     }
 
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        self.local.file_manager_command(path)
+    }
+
     fn is_remote(&self) -> bool {
         false
     }

@@ -85,8 +85,8 @@ pub fn run_event(
 
 /// 从主仓复制一个(通常未跟踪的)文件到 worktree。源不存在则跳过(非失败)。
 fn copy_file(host: &dyn Host, repo_root: &Path, worktree: &Path, rel: &str) -> StepResult {
-    let src = repo_root.join(rel);
-    let dst = worktree.join(rel);
+    let src = host.join_path(repo_root, rel);
+    let dst = host.join_path(worktree, rel);
     let desc = format!("copy {rel}");
 
     if !host.exists(&src) {

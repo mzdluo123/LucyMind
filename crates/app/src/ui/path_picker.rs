@@ -23,7 +23,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
-use lucy_core::host::{DirEntry, Host};
+use lucy_core::host::{DirEntry, Host, LocalHost, WslHost};
 
 use crate::theme;
 use crate::ui::{button, button_row, icon_button, ButtonVariant};
@@ -125,7 +125,7 @@ struct PickerState {
 #[derive(Clone, Debug)]
 pub enum PathPickerEvent {
     /// 用户确认了输入框中的目录路径。
-    Confirmed(PathBuf),
+    Confirmed { path: PathBuf, is_remote: bool },
     /// 用户关闭了选择器(Esc 或点击遮罩)。
     Dismissed,
 }
@@ -258,6 +258,50 @@ impl PathPicker {
         self.state.error.as_deref()
     }
 
+    /// 当前是否浏览 WSL 文件系统。
+    pub fn is_remote(&self) -> bool {
+        self.host.is_remote()
+    }
+
+    fn local_initial_query() -> String {
+        std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(|home| {
+                if home.ends_with(std::path::MAIN_SEPARATOR) {
+                    home
+                } else {
+                    format!("{home}{}", std::path::MAIN_SEPARATOR)
+                }
+            })
+            .unwrap_or_else(|_| format!(".{}", std::path::MAIN_SEPARATOR))
+    }
+
+    /// 在 Windows 本机文件系统与 WSL 文件系统之间切换。
+    fn switch_location(&mut self, remote: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.is_remote() == remote {
+            return;
+        }
+        self.cancel_flag.store(true, Ordering::Release);
+        self.host = if remote {
+            Arc::new(WslHost::default())
+        } else {
+            Arc::new(LocalHost)
+        };
+        self.separator = if remote {
+            '/'
+        } else {
+            std::path::MAIN_SEPARATOR
+        };
+        self.back_history.clear();
+        self.forward_history.clear();
+        let query = if remote {
+            "/".to_string()
+        } else {
+            Self::local_initial_query()
+        };
+        self.set_query(&query, window, cx);
+    }
+
     // ─────────────── 核心:update_matches ───────────────
 
     /// 更新补全列表:切分 dir/suffix,dir 变化时后台 list_dir,suffix 变化时只过滤。
@@ -379,9 +423,10 @@ impl PathPicker {
 
     /// Enter / 确认按钮:始终确认输入框中的路径，不隐式替换成列表选中项。
     fn confirm(&mut self, cx: &mut Context<Self>) {
-        cx.emit(PathPickerEvent::Confirmed(PathBuf::from(
-            self.state.query.clone(),
-        )));
+        cx.emit(PathPickerEvent::Confirmed {
+            path: PathBuf::from(self.state.query.clone()),
+            is_remote: self.host.is_remote(),
+        });
     }
 
     /// 返回当前浏览目录的上一级。
@@ -563,6 +608,42 @@ impl Render for PathPicker {
             .child(div().flex_1().min_w_0().child(input_el));
         let list = self.render_list(cx);
 
+        #[cfg(target_os = "windows")]
+        let location_switch: Option<AnyElement> = {
+            let remote = self.host.is_remote();
+            Some(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(theme::space_xs())
+                    .child(
+                        button("picker-location-local", "本机")
+                            .variant(if remote {
+                                ButtonVariant::Neutral
+                            } else {
+                                ButtonVariant::Confirm
+                            })
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.switch_location(false, window, cx);
+                            })),
+                    )
+                    .child(
+                        button("picker-location-wsl", "WSL")
+                            .variant(if remote {
+                                ButtonVariant::Confirm
+                            } else {
+                                ButtonVariant::Neutral
+                            })
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.switch_location(true, window, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        };
+        #[cfg(not(target_os = "windows"))]
+        let location_switch: Option<AnyElement> = None;
+
         let buttons: Vec<AnyElement> = vec![
             button("picker-cancel", "取消")
                 .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
@@ -647,10 +728,31 @@ impl Render for PathPicker {
                             .text_color(rgb(theme::TEXT_BRIGHT))
                             .child(SharedString::from("选择仓库目录")),
                     )
+                    .children(location_switch)
                     .child(path_row)
                     .child(list)
                     .child(button_row(buttons)),
             )
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl PathPicker {
+    pub fn separator_for_test(&self) -> char {
+        self.separator
+    }
+
+    pub fn switch_location_for_test(
+        &mut self,
+        remote: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switch_location(remote, window, cx);
+    }
+
+    pub fn confirm_for_test(&mut self, cx: &mut Context<Self>) {
+        self.confirm(cx);
     }
 }
 

@@ -89,7 +89,7 @@ impl WorkspaceView {
             copy_files: split_lines(&read(&form.copy_files)),
         };
 
-        let path = repo.join(".worktree.toml");
+        let path = self.host.join_path(&repo, ".worktree.toml");
         match config::set_worktree_settings(self.host.as_ref(), &path, &s) {
             Ok(()) => {
                 // 重载(拿到写回后的配置)并关面板。

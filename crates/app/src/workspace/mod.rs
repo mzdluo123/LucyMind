@@ -30,9 +30,7 @@ use lucy_core::config::{self, WorktreeConfig};
 use lucy_core::git::{self, CreateMode, WorktreeEntry};
 use lucy_core::github::{self, PullRequest};
 use lucy_core::hooks::{self, HookContext, LifecycleEvent};
-#[cfg(feature = "test-support")]
-use lucy_core::host::LocalHost;
-use lucy_core::host::{Host, HostCommand};
+use lucy_core::host::{Host, HostCommand, LocalHost};
 use lucy_core::session::{self, Registry, Session};
 
 use crate::terminal_view::TerminalView;
@@ -295,9 +293,12 @@ impl WorkspaceView {
     /// 设置仓库根:加载其配置、刷新 worktree 列表。
     fn set_repo(&mut self, repo: PathBuf) {
         let repo = canon(self.host.as_ref(), &repo);
-        self.config = config::load(self.host.as_ref(), repo.join(".worktree.toml"))
-            .map(|l| l.config)
-            .unwrap_or_default();
+        self.config = config::load(
+            self.host.as_ref(),
+            self.host.join_path(&repo, ".worktree.toml"),
+        )
+        .map(|l| l.config)
+        .unwrap_or_default();
         // 先设 repo,list_worktrees_canon 依赖它。
         self.repo = Some(repo.clone());
         self.worktrees = self.list_worktrees_canon();
@@ -351,7 +352,14 @@ impl WorkspaceView {
              event: &crate::ui::PathPickerEvent,
              cx: &mut Context<Self>| {
                 match event {
-                    PathPickerEvent::Confirmed(path) => {
+                    PathPickerEvent::Confirmed { path, is_remote } => {
+                        if *is_remote != this.host.is_remote() {
+                            if *is_remote {
+                                this.set_host(Arc::new(lucy_core::host::WslHost::default()));
+                            } else {
+                                this.set_host(Arc::new(LocalHost));
+                            }
+                        }
                         // 验证是 git 仓库 → set_repo;失败 → 在 PathPicker 内显示错误。
                         match lucy_core::git::main_worktree_root(this.host.as_ref(), path) {
                             Some(root) => {
@@ -482,27 +490,40 @@ impl WorkspaceView {
                 .chain(wt_env)
                 .collect();
 
-        let cwd = wt_path.to_path_buf();
-        // WSL 模式:env 编入 wsl.exe 命令行(PTY env 不跨 Windows→WSL 边界)。
-        // 本地模式:ShellKind::command() 或 Host::default_shell();env 交给 PTY。
-        let (command, pty_env) = if self.host.is_remote() {
-            (self.host.shell_with_env(wt_path, &env), Vec::new())
-        } else {
-            (
-                shell
-                    .command(self.host.is_remote())
-                    .or_else(|| self.host.default_shell(wt_path)),
-                env,
-            )
-        };
+        let (working_directory, command, pty_env) = self.shell_spawn_options(wt_path, shell, env);
         let terminal = cx.new(|cx| {
-            TerminalView::new(cx, Some(cwd), command, pty_env)
+            TerminalView::new(cx, working_directory, command, pty_env)
                 .expect("failed to start shell terminal")
         });
         TerminalTab {
             terminal,
             title: shell.label().to_string(),
         }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn shell_spawn_options(
+        &self,
+        wt_path: &std::path::Path,
+        shell: ShellKind,
+        env: Vec<(String, String)>,
+    ) -> (
+        Option<PathBuf>,
+        Option<(String, Vec<String>)>,
+        Vec<(String, String)>,
+    ) {
+        // WSL 模式:env 和 Linux cwd 编入 wsl.exe 命令行。ConPTY 的 cwd 必须
+        // 留空,否则 Windows 会把 `/home/...` 当作本机目录并在 spawn 前失败。
+        if self.host.is_remote() {
+            return (None, self.host.shell_with_env(wt_path, &env), Vec::new());
+        }
+        (
+            Some(wt_path.to_path_buf()),
+            shell
+                .command(false)
+                .or_else(|| self.host.default_shell(wt_path)),
+            env,
+        )
     }
 
     fn persist_registry(&self) {
@@ -574,8 +595,8 @@ impl WorkspaceView {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".into());
         let parent = config::resolve_sibling_dir(&self.config.worktree.dir, &repo_name);
-        let parent_dir = repo.join(&parent);
-        let wt_path = git::sibling_worktree_path(&parent_dir, &branch);
+        let parent_dir = self.host.join_path(&repo, &parent);
+        let wt_path = git::sibling_worktree_path(self.host.as_ref(), &parent_dir, &branch);
 
         // 1) 建 worktree(带分支占用检查)。
         let add_res = git::add(
@@ -835,7 +856,8 @@ impl WorkspaceView {
     }
 
     /// 在系统文件管理器中打开 active worktree 目录。
-    /// macOS: `open`、Windows: `explorer`、Linux: `xdg-open`。
+    /// 本地由平台文件管理器打开；WSL 通过 `wsl.exe --cd <path> -- explorer.exe .`
+    /// 让 WSL 负责把 Linux 路径转换成 Explorer 可识别的位置。
     /// 用 `spawn()`(非 `status()`),不阻塞 UI 线程。无 active 时 no-op。
     /// 测试构建(`test-support` feature)下不 spawn(避免弹真实 explorer 窗口)。
     fn reveal_in_file_manager(&self, _cx: &mut Context<Self>) {
@@ -844,13 +866,9 @@ impl WorkspaceView {
         };
         #[cfg(not(feature = "test-support"))]
         {
-            let path = path.clone();
-            #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open").arg(&path).spawn();
-            #[cfg(target_os = "windows")]
-            let _ = std::process::Command::new("explorer").arg(&path).spawn();
-            #[cfg(target_os = "linux")]
-            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+            if let Some((program, args)) = self.host.file_manager_command(path) {
+                let _ = std::process::Command::new(program).args(args).spawn();
+            }
         }
         #[cfg(feature = "test-support")]
         {
@@ -1152,6 +1170,29 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn reveal_in_file_manager_for_test(&self, cx: &mut Context<Self>) {
         self.reveal_in_file_manager(cx);
+    }
+
+    /// 返回当前目录对应的文件管理器命令,不启动外部进程。
+    #[cfg(feature = "test-support")]
+    pub fn file_manager_command_for_test(&self) -> Option<(String, Vec<String>)> {
+        self.active
+            .as_deref()
+            .and_then(|path| self.host.file_manager_command(path))
+    }
+
+    /// 返回 shell 的 PTY 启动规格,但不实际创建终端。
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::type_complexity)]
+    pub fn shell_spawn_options_for_test(
+        &self,
+        path: &std::path::Path,
+        env: Vec<(String, String)>,
+    ) -> (
+        Option<PathBuf>,
+        Option<(String, Vec<String>)>,
+        Vec<(String, String)>,
+    ) {
+        self.shell_spawn_options(path, ShellKind::Default, env)
     }
 
     /// 读 launcher 菜单是否打开。

@@ -138,7 +138,7 @@ pub fn unlock(
 /// 检测仓库是否使用 submodule。worktree 对 submodule 支持弱,
 /// UI 层应据此给降级提示(不假装完全支持)。
 pub fn uses_submodules(host: &dyn Host, repo: impl AsRef<Path>) -> bool {
-    host.exists(&repo.as_ref().join(".gitmodules"))
+    host.exists(&host.join_path(repo.as_ref(), ".gitmodules"))
 }
 
 /// 从任意子目录解析出**主仓库工作树根**(`git rev-parse --show-toplevel`)。
@@ -227,8 +227,8 @@ pub fn prune(host: &dyn Host, repo: impl AsRef<Path>) -> Result<(), GitError> {
 }
 
 /// 给定 sibling 父目录与分支名,计算 worktree 路径(分支名做文件系统安全清理)。
-pub fn sibling_worktree_path(parent_dir: &Path, branch: &str) -> PathBuf {
-    parent_dir.join(sanitize_branch_for_path(branch))
+pub fn sibling_worktree_path(host: &dyn Host, parent_dir: &Path, branch: &str) -> PathBuf {
+    host.join_path(parent_dir, &sanitize_branch_for_path(branch))
 }
 
 /// 把分支名清理成文件系统安全的目录名(`feature/x` → `feature-x`)。
@@ -255,7 +255,11 @@ mod tests {
 
     #[test]
     fn builds_sibling_path() {
-        let p = sibling_worktree_path(Path::new("/tmp/proj-worktrees"), "feature/x");
+        let p = sibling_worktree_path(
+            &crate::host::LocalHost,
+            Path::new("/tmp/proj-worktrees"),
+            "feature/x",
+        );
         assert_eq!(p, PathBuf::from("/tmp/proj-worktrees/feature-x"));
     }
 }

@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::TestAppContext;
 
 use common::{build_workspace_with_host, shutdown_workspace, wait_for};
-use lucy_core::host::{Host, WslHost};
+use lucy_core::host::{Host, LocalHost, WslHost};
 
 mod common;
 
@@ -48,7 +48,7 @@ fn wsl_temp_repo() -> Option<PathBuf> {
     let repo = format!("{dir}/repo");
     // git init + 初始提交。
     let cmds = [
-        format!("git init -q {repo}"),
+        format!("git init -q -b main {repo}"),
         format!("git -C {repo} config user.name test"),
         format!("git -C {repo} config user.email test@test.com"),
         format!("git -C {repo} commit -q --allow-empty -m init"),
@@ -76,7 +76,6 @@ async fn wsl_open_repo_loads_worktrees(cx: &mut TestAppContext) {
         Some(r) => r,
         None => return,
     };
-
     let host: Arc<dyn lucy_core::host::Host> = host;
     let (workspace, _w) = build_workspace_with_host(cx, Some(repo.clone()), host);
     cx.run_until_parked();
@@ -146,6 +145,20 @@ async fn wsl_shell_tab_starts(cx: &mut TestAppContext) {
         Some(r) => r,
         None => return,
     };
+    let expected_shell = host
+        .run_shell(
+            std::path::Path::new("/tmp"),
+            "getent passwd \"$(id -u)\" | cut -d: -f7",
+            &[],
+        )
+        .expect("query WSL default shell")
+        .stdout
+        .trim()
+        .to_string();
+    assert!(
+        !expected_shell.is_empty(),
+        "WSL user must have a default shell"
+    );
 
     let host: Arc<dyn lucy_core::host::Host> = host;
     let (workspace, _w) = build_workspace_with_host(cx, Some(repo.clone()), host);
@@ -172,6 +185,55 @@ async fn wsl_shell_tab_starts(cx: &mut TestAppContext) {
         "should have a terminal group for the new worktree"
     );
 
+    let (active, reveal) = cx.update(|cx| {
+        let view = workspace.read(cx);
+        (
+            view.active_path().map(PathBuf::from),
+            view.file_manager_command_for_test(),
+        )
+    });
+    let active = active.expect("worktree should be active");
+    assert_eq!(
+        reveal,
+        Some((
+            "wsl.exe".to_string(),
+            vec![
+                "--cd".to_string(),
+                active.to_string_lossy().into_owned(),
+                "--".to_string(),
+                "explorer.exe".to_string(),
+                ".".to_string(),
+            ]
+        )),
+        "Explorer must receive the WSL cwd through wsl.exe"
+    );
+
+    let terminal = cx
+        .update(|cx| workspace.read(cx).terminal_at(&active).cloned())
+        .expect("active terminal");
+    wait_for(
+        cx,
+        |cx| cx.read(|cx| !terminal.read(cx).snapshot_text().is_empty()),
+        Duration::from_secs(15),
+    );
+    cx.update(|cx| {
+        terminal.update(cx, |terminal, _| {
+            terminal.send_text("printf '\\nWSL_DEFAULT_SHELL:%s\\n' \"$0\"\r")
+        });
+    });
+    wait_for(
+        cx,
+        |cx| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .snapshot_text()
+                    .contains(&format!("WSL_DEFAULT_SHELL:{expected_shell}"))
+            })
+        },
+        Duration::from_secs(15),
+    );
+
     shutdown_workspace(cx, &workspace);
 }
 
@@ -190,8 +252,9 @@ async fn wsl_post_create_hook_runs(cx: &mut TestAppContext) {
 
     // 写 .worktree.toml 配置 post_create hook。
     let host_dyn: Arc<dyn lucy_core::host::Host> = host.clone();
-    let toml = "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\npost_create = [\"echo HELLO > hook_test.txt\"]\n";
-    let toml_path = repo.join(".worktree.toml");
+    let toml = "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\n\
+                [hooks]\npost_create = [\"echo HELLO > hook_test.txt\"]\n";
+    let toml_path = host_dyn.join_path(&repo, ".worktree.toml");
     let _ = host_dyn.write(&toml_path, toml);
 
     let (workspace, _w) = build_workspace_with_host(cx, Some(repo.clone()), host_dyn.clone());
@@ -210,8 +273,9 @@ async fn wsl_post_create_hook_runs(cx: &mut TestAppContext) {
     // 验证 hook 产物:active worktree 路径下应有 hook_test.txt,内容含 HELLO。
     let hook_file_exists = cx.update(|cx| {
         workspace.update(cx, |v, _| {
-            v.active_path()
-                .is_some_and(|p: &std::path::Path| host_dyn.exists(&p.join("hook_test.txt")))
+            v.active_path().is_some_and(|p: &std::path::Path| {
+                host_dyn.exists(&host_dyn.join_path(p, "hook_test.txt"))
+            })
         })
     });
     assert!(
@@ -219,5 +283,101 @@ async fn wsl_post_create_hook_runs(cx: &mut TestAppContext) {
         "post_create hook should create hook_test.txt"
     );
 
+    shutdown_workspace(cx, &workspace);
+}
+
+/// 14.5: 从默认本机 PathPicker 切换到 WSL,选择 WSL git 仓库。
+#[cfg(target_os = "windows")]
+#[gpui::test]
+#[ignore = "requires real WSL environment"]
+async fn local_picker_selects_wsl_repository(cx: &mut TestAppContext) {
+    let repo = match wsl_temp_repo() {
+        Some(repo) => repo,
+        None => return,
+    };
+    let host: Arc<dyn Host> = Arc::new(LocalHost);
+    let (workspace, window) = build_workspace_with_host(cx, None, host);
+
+    window.update(|window, cx| {
+        workspace.update(cx, |view, cx| view.open_repo_picker_for_test(window, cx));
+    });
+    let picker = window
+        .update(|_window, cx| workspace.read(cx).path_picker_for_test().cloned())
+        .expect("picker should be open");
+    window.update(|window, cx| {
+        picker.update(cx, |picker, cx| {
+            picker.switch_location_for_test(true, window, cx);
+            picker.set_query(&repo.to_string_lossy(), window, cx);
+            picker.confirm_for_test(cx);
+        });
+    });
+
+    wait_for(
+        window,
+        |cx| {
+            cx.update(|cx| {
+                let view = workspace.read(cx);
+                view.is_remote_host() && view.repo() == Some(repo.as_path())
+            })
+        },
+        Duration::from_secs(15),
+    );
+    shutdown_workspace(window, &workspace);
+}
+
+/// 14.6: WSL shell 真正启动后执行假 agent 命令并渲染输出。
+#[cfg(target_os = "windows")]
+#[gpui::test]
+#[ignore = "requires real WSL environment"]
+async fn wsl_agent_command_runs_in_terminal(cx: &mut TestAppContext) {
+    let host = match wsl_available() {
+        Some(host) => host,
+        None => return,
+    };
+    let repo = match wsl_temp_repo() {
+        Some(repo) => repo,
+        None => return,
+    };
+    let config = "[agents.test]\ncommand = \"printf\"\nargs = [\"WSL_AGENT_OK\\n\"]\n";
+    host.write(&host.join_path(&repo, ".worktree.toml"), config)
+        .unwrap();
+
+    let host: Arc<dyn Host> = host;
+    let (workspace, _window) = build_workspace_with_host(cx, Some(repo.clone()), host);
+    cx.update(|cx| {
+        workspace.update(cx, |view, cx| view.open_worktree_for_test(repo.clone(), cx));
+    });
+    wait_for(
+        cx,
+        |cx| {
+            let terminal = cx.update(|cx| {
+                let view = workspace.read(cx);
+                view.active_path()
+                    .and_then(|path| view.terminal_at(path))
+                    .cloned()
+            });
+            terminal
+                .is_some_and(|terminal| cx.read(|cx| !terminal.read(cx).snapshot_text().is_empty()))
+        },
+        Duration::from_secs(15),
+    );
+    cx.update(|cx| {
+        workspace.update(cx, |view, cx| view.send_agent_command_for_test("test", cx));
+    });
+    wait_for(
+        cx,
+        |cx| {
+            let terminal = cx.update(|cx| {
+                let view = workspace.read(cx);
+                view.active_path()
+                    .and_then(|path| view.terminal_at(path))
+                    .cloned()
+            });
+            terminal.is_some_and(|terminal| {
+                cx.read(|cx| terminal.read(cx).snapshot_text().contains("WSL_AGENT_OK"))
+            })
+        },
+        Duration::from_secs(15),
+    );
     shutdown_workspace(cx, &workspace);
 }

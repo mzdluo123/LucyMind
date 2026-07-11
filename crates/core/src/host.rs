@@ -101,6 +101,11 @@ pub trait Host: Send + Sync {
     /// 递归创建目录(已存在则 no-op)。
     fn create_dir_all(&self, path: &Path) -> Result<(), HostError>;
 
+    /// 按宿主平台的分隔符拼接路径。
+    fn join_path(&self, base: &Path, child: &str) -> PathBuf {
+        base.join(child)
+    }
+
     /// 列出目录下的条目(名称 + 是否目录),隐藏文件(以 `.` 开头)不返回。
     /// 目录排在文件前面,同类按名称排序。用于文件选择器浏览。
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, HostError>;
@@ -116,6 +121,10 @@ pub trait Host: Send + Sync {
     /// (PTY env 不会跨 Windows→WSL 边界,需编入命令行)。
     fn shell_with_env(&self, cwd: &Path, env: &[(String, String)])
         -> Option<(String, Vec<String>)>;
+
+    /// 返回在宿主文件管理器中打开目录的命令。
+    /// WSL 路径必须先留在 Linux 侧,再由 `explorer.exe .` 完成路径转换。
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)>;
 
     /// 是否是远程 Host(WSL/SSH)。app 层据此调整 UI(如隐藏本地 shell 选项)。
     fn is_remote(&self) -> bool;
@@ -256,6 +265,18 @@ impl Host for LocalHost {
         None
     }
 
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        let path = path.to_string_lossy().into_owned();
+        #[cfg(target_os = "macos")]
+        return Some(("open".to_string(), vec![path]));
+        #[cfg(target_os = "windows")]
+        return Some(("explorer.exe".to_string(), vec![path]));
+        #[cfg(target_os = "linux")]
+        return Some(("xdg-open".to_string(), vec![path]));
+        #[allow(unreachable_code)]
+        None
+    }
+
     fn is_remote(&self) -> bool {
         false
     }
@@ -274,6 +295,9 @@ pub struct WslHost {
 }
 
 impl WslHost {
+    /// 查询当前 WSL 用户的 passwd shell 并用它替换引导进程。
+    const DEFAULT_SHELL_BOOTSTRAP: &str = "entry=$(getent passwd \"$(id -u)\" 2>/dev/null || true); shell=${entry##*:}; if [ ! -x \"$shell\" ]; then shell=${SHELL:-/bin/sh}; fi; exec \"$shell\"";
+
     /// 构造 `wsl.exe` 的基础 Command(加 distro flag 如有)。
     fn wsl_command(&self) -> Command {
         let mut c = Command::new("wsl.exe");
@@ -362,6 +386,15 @@ impl Host for WslHost {
         }
     }
 
+    fn join_path(&self, base: &Path, child: &str) -> PathBuf {
+        if child.starts_with('/') {
+            return PathBuf::from(child);
+        }
+        let base = base.to_string_lossy();
+        let child = child.replace('\\', "/");
+        PathBuf::from(format!("{}/{child}", base.trim_end_matches('/')))
+    }
+
     fn exists(&self, path: &Path) -> bool {
         let mut c = self.wsl_command();
         c.arg("--").arg("test").arg("-e").arg(path);
@@ -386,7 +419,10 @@ impl Host for WslHost {
         use std::io::Write;
         let mut c = self.wsl_command();
         c.arg("--").arg("tee").arg(path);
-        let mut child = c.stdin(std::process::Stdio::piped()).spawn()?;
+        let mut child = c
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()?;
         {
             let stdin = child.stdin.as_mut().expect("piped stdin");
             stdin.write_all(content.as_bytes())?;
@@ -468,8 +504,8 @@ impl Host for WslHost {
         cwd: &Path,
         env: &[(String, String)],
     ) -> Option<(String, Vec<String>)> {
-        // wsl.exe --cd <cwd> -- env K=V K=V ... /bin/sh
-        // PTY env 不跨 Windows→WSL 边界,故把 env 编入命令行。
+        // PTY env 不跨 Windows→WSL 边界,故把 env 编入命令行。`/bin/sh`
+        // 只负责读取 passwd shell,随后立即 exec 成用户的 bash/zsh/fish 等默认 shell。
         let mut args = vec!["--cd".to_string(), cwd.to_string_lossy().into_owned()];
         args.push("--".to_string());
         if !env.is_empty() {
@@ -478,7 +514,27 @@ impl Host for WslHost {
                 args.push(format!("{k}={v}"));
             }
         }
-        args.push("/bin/sh".to_string());
+        args.extend([
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            Self::DEFAULT_SHELL_BOOTSTRAP.to_string(),
+        ]);
+        Some(("wsl.exe".to_string(), args))
+    }
+
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        let mut args = Vec::new();
+        if let Some(distro) = &self.distro {
+            args.push("--distribution".to_string());
+            args.push(distro.clone());
+        }
+        args.extend([
+            "--cd".to_string(),
+            path.to_string_lossy().into_owned(),
+            "--".to_string(),
+            "explorer.exe".to_string(),
+            ".".to_string(),
+        ]);
         Some(("wsl.exe".to_string(), args))
     }
 
@@ -657,6 +713,10 @@ impl Host for MockHost {
         _env: &[(String, String)],
     ) -> Option<(String, Vec<String>)> {
         None
+    }
+
+    fn file_manager_command(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        LocalHost.file_manager_command(path)
     }
 
     fn is_remote(&self) -> bool {
@@ -916,6 +976,19 @@ mod tests {
     }
 
     #[test]
+    fn wsl_host_join_path_uses_posix_separator() {
+        let host = WslHost::default();
+        assert_eq!(
+            host.join_path(Path::new("/home/user/repo"), ".worktree.toml"),
+            PathBuf::from("/home/user/repo/.worktree.toml")
+        );
+        assert_eq!(
+            host.join_path(Path::new("/home/user/repo"), r"..\repo-worktrees"),
+            PathBuf::from("/home/user/repo/../repo-worktrees")
+        );
+    }
+
+    #[test]
     fn wsl_host_is_remote_true() {
         assert!(WslHost::default().is_remote());
     }
@@ -966,23 +1039,55 @@ mod tests {
                 "TERM=xterm-256color".to_string(),
                 "WORKTREE_PATH=/home/user/wt".to_string(),
                 "/bin/sh".to_string(),
+                "-c".to_string(),
+                WslHost::DEFAULT_SHELL_BOOTSTRAP.to_string(),
             ]
         );
     }
 
     #[test]
-    fn wsl_host_shell_with_env_no_env_still_has_sh() {
+    fn wsl_host_shell_with_env_reads_users_default_shell() {
         let host = WslHost::default();
         let shell = host
             .shell_with_env(Path::new("/home/user/wt"), &[])
             .expect("WslHost returns Some");
-        // 即使无 env,仍应有 -- /bin/sh(无 env 前缀)。
+        // 即使无 env,仍通过确定性引导脚本读取 passwd shell。
         assert_eq!(shell.0, "wsl.exe");
-        assert!(shell.1.contains(&"--".to_string()));
-        assert!(shell.1.contains(&"/bin/sh".to_string()));
+        assert_eq!(
+            &shell.1[shell.1.len() - 3..],
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                WslHost::DEFAULT_SHELL_BOOTSTRAP.to_string(),
+            ]
+        );
+        assert!(shell.1.last().unwrap().contains("getent passwd"));
+        assert!(shell.1.last().unwrap().contains("exec \"$shell\""));
         assert!(
             !shell.1.contains(&"env".to_string()),
             "should not have env prefix when empty"
+        );
+    }
+
+    #[test]
+    fn wsl_host_file_manager_command_uses_linux_cwd() {
+        let host = WslHost {
+            distro: Some("Ubuntu-24.04".to_string()),
+        };
+        assert_eq!(
+            host.file_manager_command(Path::new("/home/user/project with spaces")),
+            Some((
+                "wsl.exe".to_string(),
+                vec![
+                    "--distribution".to_string(),
+                    "Ubuntu-24.04".to_string(),
+                    "--cd".to_string(),
+                    "/home/user/project with spaces".to_string(),
+                    "--".to_string(),
+                    "explorer.exe".to_string(),
+                    ".".to_string(),
+                ]
+            ))
         );
     }
 
