@@ -1,5 +1,12 @@
 # LucyMind
 
+[![CI](https://github.com/mzdluo123/LucyMind/actions/workflows/ci.yml/badge.svg)](https://github.com/mzdluo123/LucyMind/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/mzdluo123/LucyMind?style=flat-square)](https://github.com/mzdluo123/LucyMind/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/mzdluo123/LucyMind/total?style=flat-square)](https://github.com/mzdluo123/LucyMind/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://opensource.org/license/mit)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey?style=flat-square)](https://github.com/mzdluo123/LucyMind/releases/latest)
+
 LucyMind 是一个面向 AI 编程工作流的桌面工具。它用 Git worktree 为每个任务创建独立工作区，并在内嵌的真实终端中启动 Claude Code、Codex 或 OpenCode，让多个 Agent 可以并行工作而不会互相覆盖文件。
 
 > 项目目前以 macOS 为主要运行平台；代码中已包含 Windows 与 WSL 适配基础，相关体验仍在持续完善。
