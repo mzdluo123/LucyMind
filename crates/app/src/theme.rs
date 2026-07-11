@@ -81,14 +81,21 @@ pub const STATE_OK: u32 = 0x6f_9c_88;
 
 // ---- 字体 ----
 
-/// 界面字体(侧边栏/标题/按钮):Monaco —— macOS 经典等宽,方正硬朗、程序员
-/// 气质,系统自带。
+/// 界面字体(侧边栏/标题/按钮)。使用各平台自带字体，避免 DirectWrite/CoreText
+/// 因找不到其他平台的字体而记录错误。
 ///
 /// 之前用 Futura(几何无衬线),但它无中文字形:侧边栏里的中文(worktree
 /// 别名等)回退到苹方,而苹方在同字号下字面远大于 Futura,中文显得比英文大
 /// 一截、且不扁平。换成等宽的 Monaco 后,英文字面本就偏方偏大,与中文(仍
 /// 回退苹方)的落差大幅缩小,中英并排更协调,也更贴合终端工具的调性。
+#[cfg(target_os = "macos")]
 pub const FONT_UI: &str = "Monaco";
+#[cfg(target_os = "windows")]
+pub const FONT_UI: &str = "Microsoft YaHei UI";
+#[cfg(target_os = "linux")]
+pub const FONT_UI: &str = "DejaVu Sans";
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub const FONT_UI: &str = "sans-serif";
 
 // ---- 形状 ----
 

@@ -1048,6 +1048,13 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if !is_renderable_area(bounds) {
+            self.view.update(cx, |v, _| {
+                v.last_bounds = None;
+            });
+            return;
+        }
+
         // 注册 IME 输入目标(须在 paint 阶段)。
         let focus = self.view.read(cx).focus.clone();
         window.handle_input(
@@ -1132,6 +1139,10 @@ fn paint_grid(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !is_renderable_area(bounds) || cell_w <= px(0.0) || line_height <= px(0.0) {
+        return;
+    }
+
     let origin = bounds.origin;
 
     // 选区高亮(先画,压在文字下)。复制时用更亮 alpha。
@@ -1281,6 +1292,10 @@ fn scrollbar_geometry(
     snap: &RenderSnapshot,
     bounds: Bounds<Pixels>,
 ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+    if !is_renderable_area(bounds) {
+        return None;
+    }
+
     let rows = snap.rows;
     let total = snap.total_lines;
     if total <= rows {
@@ -1313,6 +1328,10 @@ fn scrollbar_geometry(
 
 fn font_size_px() -> Pixels {
     px(FONT_SIZE)
+}
+
+fn is_renderable_area(bounds: Bounds<Pixels>) -> bool {
+    bounds.size.width > px(0.0) && bounds.size.height > px(0.0)
 }
 
 /// 规范化选区顺序(保证 start <= end,按行优先)。
@@ -1440,7 +1459,25 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{point, px, size, Bounds};
+
     use super::*;
+
+    #[test]
+    fn renderable_area_requires_positive_width_and_height() {
+        assert!(is_renderable_area(Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1.0), px(1.0)),
+        }));
+        assert!(!is_renderable_area(Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(0.0), px(1.0)),
+        }));
+        assert!(!is_renderable_area(Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1.0), px(0.0)),
+        }));
+    }
 
     #[test]
     fn word_boundary_alphanumeric() {
