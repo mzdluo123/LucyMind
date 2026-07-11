@@ -3,7 +3,7 @@
 //! GPUI 的 `svg()` 元素通过 `AssetSource` 按路径加载资源。原生 app 不能引在线
 //! URL,所以把 SVG 用 `include_bytes!` 编译进二进制,随 app 分发、免外部文件。
 //!
-//! 图标来自 lobehub(icons.lobehub.com),单色 `fill="currentColor"`,可跟主题染色。
+//! 品牌图标来自 lobehub，界面图标采用 Lucide；单色 SVG 可跟主题染色。
 
 use std::borrow::Cow;
 
@@ -19,6 +19,10 @@ const GIT_BRANCH_SVG: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
 const SETTINGS_SVG: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const PLUS_SVG: &[u8] = include_bytes!("../assets/icons/plus.svg");
 const FOLDER_OPEN_SVG: &[u8] = include_bytes!("../assets/icons/folder-open.svg");
+const ARROW_LEFT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-left.svg");
+const ARROW_RIGHT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-right.svg");
+const ARROW_UP_SVG: &[u8] = include_bytes!("../assets/icons/arrow-up.svg");
+const REFRESH_CW_SVG: &[u8] = include_bytes!("../assets/icons/refresh-cw.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -35,6 +39,10 @@ impl AssetSource for Assets {
             "icons/settings.svg" => Some(SETTINGS_SVG),
             "icons/plus.svg" => Some(PLUS_SVG),
             "icons/folder-open.svg" => Some(FOLDER_OPEN_SVG),
+            "icons/arrow-left.svg" => Some(ARROW_LEFT_SVG),
+            "icons/arrow-right.svg" => Some(ARROW_RIGHT_SVG),
+            "icons/arrow-up.svg" => Some(ARROW_UP_SVG),
+            "icons/refresh-cw.svg" => Some(REFRESH_CW_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -51,6 +59,10 @@ impl AssetSource for Assets {
             SharedString::from("icons/settings.svg"),
             SharedString::from("icons/plus.svg"),
             SharedString::from("icons/folder-open.svg"),
+            SharedString::from("icons/arrow-left.svg"),
+            SharedString::from("icons/arrow-right.svg"),
+            SharedString::from("icons/arrow-up.svg"),
+            SharedString::from("icons/refresh-cw.svg"),
         ])
     }
 }
