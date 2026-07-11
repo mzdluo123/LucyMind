@@ -1,15 +1,15 @@
-//! Zed 风格的路径输入选择器 —— 文本输入 + 实时目录补全 + 键盘导航。
+//! 仓库目录选择器 —— 目录浏览 + 可编辑路径 + 键盘导航。
 //!
 //! 参考 Zed 的 `OpenPathPrompt`(`crates/open_path_prompt/src/open_path_prompt.rs`):
 //! 用户输入路径,系统切分出「目录部分」(list_dir 参数)和「后缀」(过滤词),
 //! 后台异步列目录,cancel-flag 取消旧任务,前台显示过滤后的条目。
-//! Tab 补全选中条目(目录补 `/`),Enter 确认,Up/Down 导航,Esc 关闭。
+//! 列表只显示目录；单击选中、双击或 Tab 进入，Enter 确认输入的路径。
 //!
 //! 与 Zed 的差异:
 //! - 不依赖 Zed 的 `picker` / `workspace` crate(GPUI 0.2.2 + gpui-component 0.5.1)。
 //! - 用 `Host::list_dir` 抽象(LocalHost / WslHost 通用)。
 //! - 模糊过滤用简单 `contains`(非 fuzzy match + 高亮)。
-//! - 补全列表用手动 div(非 `uniform_list` 虚拟化)。
+//! - 目录列表用手动 div(非 `uniform_list` 虚拟化)。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use lucy_core::host::{DirEntry, Host};
 
 use crate::theme;
-use crate::ui::{button, button_row};
+use crate::ui::{button, button_row, ButtonVariant};
 
 // ───────────────────────────── 纯逻辑函数 ─────────────────────────────
 
@@ -59,19 +59,33 @@ pub(crate) fn get_dir_and_suffix(query: &str, separator: char) -> (String, Strin
     }
 }
 
-/// 过滤条目:后缀为空返回全部索引;非空用 `name.to_lowercase().contains(suffix)` 过滤。
-/// 保留 `Host::list_dir` 的排序(目录在前、同类按名称)。
+/// 过滤目录:文件永不显示;后缀非空时再按名称匹配。
 pub(crate) fn filter_entries(entries: &[DirEntry], suffix: &str) -> Vec<usize> {
-    if suffix.is_empty() {
-        return (0..entries.len()).collect();
-    }
     let lower = suffix.to_lowercase();
     entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.name.to_lowercase().contains(&lower))
+        .filter(|(_, e)| e.is_dir && (lower.is_empty() || e.name.to_lowercase().contains(&lower)))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// 返回一个带结尾分隔符的父目录。根目录保持不变。
+pub(crate) fn parent_directory(dir: &str, separator: char) -> String {
+    let is_separator = |c| c == separator || (separator == '\\' && c == '/');
+    let trimmed = dir.trim_end_matches(is_separator);
+    if trimmed.is_empty() {
+        return separator.to_string();
+    }
+    let Some(index) = trimmed.rfind(is_separator) else {
+        return dir.to_string();
+    };
+    let parent = &trimmed[..=index];
+    if parent.is_empty() {
+        separator.to_string()
+    } else {
+        parent.to_string()
+    }
 }
 
 /// 构造补全路径:`dir + name + (is_dir ? separator : "")`。
@@ -85,7 +99,7 @@ pub(crate) fn complete_path(dir: &str, name: &str, is_dir: bool, separator: char
 
 // ───────────────────────────── 状态 ─────────────────────────────
 
-/// 补全列表状态。
+/// 目录列表状态。
 #[derive(Default)]
 struct PickerState {
     /// 当前查询文本(与 InputState 同步)。
@@ -109,7 +123,7 @@ struct PickerState {
 /// PathPicker 发出的事件。
 #[derive(Clone, Debug)]
 pub enum PathPickerEvent {
-    /// 用户确认了一个路径(Enter 或 Browse 选中)。
+    /// 用户确认了输入框中的目录路径。
     Confirmed(PathBuf),
     /// 用户关闭了选择器(Esc 或点击遮罩)。
     Dismissed,
@@ -119,11 +133,11 @@ pub enum PathPickerEvent {
 
 /// Zed 风格的路径输入选择器。
 ///
-/// 文本输入 + 下方实时补全列表。用户输入路径时,系统自动切分出「目录部分」
+/// 可编辑路径 + 下方目录列表。用户输入路径时,系统自动切分出「目录部分」
 /// (list_dir 参数)和「后缀」(过滤词),后台异步列目录,cancel-flag 取消旧任务。
-/// Tab 补全选中条目(目录补分隔符),Enter 确认,Up/Down 导航,Esc 关闭。
+/// 双击或 Tab 进入目录,Enter 确认输入路径,Up/Down 导航,Esc 关闭。
 pub struct PathPicker {
-    /// 补全列表状态。
+    /// 目录列表状态。
     state: PickerState,
     /// Host 抽象(LocalHost / WslHost),用于 list_dir。
     host: Arc<dyn Host>,
@@ -192,7 +206,7 @@ impl PathPicker {
         self.input.read(cx).value().to_string()
     }
 
-    /// 设置查询文本(外部调用,如 Browse 选中后填入路径)。
+    /// 设置路径文本(进入目录或返回上级时调用)。
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let q = query.to_string();
         self.input.update(cx, |s, cx| {
@@ -236,11 +250,6 @@ impl PathPicker {
     /// 错误信息(测试用)。
     pub fn error(&self) -> Option<&str> {
         self.state.error.as_deref()
-    }
-
-    /// 是否有 Browse 按钮(本地模式才有,测试用)。
-    pub fn has_browse_button(&self) -> bool {
-        !self.host.is_remote()
     }
 
     // ─────────────── 核心:update_matches ───────────────
@@ -345,32 +354,30 @@ impl PathPicker {
         cx.notify();
     }
 
-    /// Tab: 补全选中条目。目录补分隔符(触发重新 list_dir),文件不补。
-    fn confirm_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 进入选中的目录。
+    fn enter_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(&entry_idx) = self.state.filtered.get(self.state.selected_index) else {
             return;
         };
         let entry = &self.state.entries[entry_idx];
-        // 空名或当前目录条目不补全。
-        if entry.name.is_empty() {
+        if entry.name.is_empty() || !entry.is_dir {
             return;
         }
         let new_query = complete_path(&self.state.dir, &entry.name, entry.is_dir, self.separator);
         self.set_query(&new_query, window, cx);
     }
 
-    /// Enter: 确认选中条目(或输入的完整路径)。
+    /// Enter / 确认按钮:始终确认输入框中的路径，不隐式替换成列表选中项。
     fn confirm(&mut self, cx: &mut Context<Self>) {
-        let path = if let Some(&entry_idx) = self.state.filtered.get(self.state.selected_index) {
-            // 选中条目 → dir + name。
-            let entry = &self.state.entries[entry_idx];
-            let p = format!("{}{}", self.state.dir, entry.name);
-            PathBuf::from(p)
-        } else {
-            // 无选中 → 用输入的完整 query。
-            PathBuf::from(self.state.query.clone())
-        };
-        cx.emit(PathPickerEvent::Confirmed(path));
+        cx.emit(PathPickerEvent::Confirmed(PathBuf::from(
+            self.state.query.clone(),
+        )));
+    }
+
+    /// 返回当前浏览目录的上一级。
+    fn go_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let parent = parent_directory(&self.state.dir, self.separator);
+        self.set_query(&parent, window, cx);
     }
 
     /// Esc / 遮罩点击:关闭。
@@ -379,40 +386,11 @@ impl PathPicker {
         cx.emit(PathPickerEvent::Dismissed);
     }
 
-    /// Browse 按钮:打开系统文件选择器(仅本地模式)。
-    fn browse(&mut self, cx: &mut Context<Self>) {
-        if self.host.is_remote() {
-            return;
-        }
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open Git repository".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(dir) = paths.into_iter().next() {
-                    let _ = this.update(cx, |_this, cx| {
-                        cx.emit(PathPickerEvent::Confirmed(dir));
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
     // ─────────────── 渲染 ───────────────
 
-    /// 补全列表条目。
+    /// 目录列表条目。
     fn render_entry(&self, i: usize, entry: &DirEntry, cx: &mut Context<Self>) -> impl IntoElement {
         let is_selected = i == self.state.selected_index;
-        let icon = if entry.is_dir { "📁 " } else { "📄 " };
-        let text_color = if entry.is_dir {
-            theme::TEXT
-        } else {
-            theme::TEXT_FAINT
-        };
         let name = entry.name.clone();
 
         div()
@@ -430,14 +408,23 @@ impl PathPicker {
                     .border_color(rgb(theme::TEXT_BRIGHT))
             })
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
-            .text_color(rgb(text_color))
-            .child(SharedString::from(format!("{icon}{name}")))
-            .on_click(cx.listener(move |this, _ev: &ClickEvent, _w, cx| {
+            .text_color(rgb(theme::TEXT))
+            .child(
+                gpui::svg()
+                    .size(px(16.0))
+                    .path("icons/folder-open.svg")
+                    .text_color(rgb(theme::TEXT_DIM)),
+            )
+            .child(SharedString::from(name))
+            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.select(i, cx);
+                if ev.click_count() == 2 {
+                    this.enter_selected(window, cx);
+                }
             }))
     }
 
-    /// 补全列表区(可滚动)。
+    /// 目录列表区(可滚动)。
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div()
             .id("picker-list")
@@ -469,7 +456,7 @@ impl PathPicker {
                     .px(theme::space_sm())
                     .py(theme::space_xs())
                     .text_color(rgb(theme::TEXT_FAINT))
-                    .child(SharedString::from("(无匹配)")),
+                    .child(SharedString::from("没有匹配的文件夹")),
             );
         } else {
             for (i, &entry_idx) in self.state.filtered.iter().enumerate() {
@@ -493,32 +480,32 @@ impl Focusable for PathPicker {
 impl Render for PathPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input_el: AnyElement = Input::new(&self.input).into_any_element();
-        let browse_el: Option<AnyElement> = if !self.host.is_remote() {
-            Some(
-                button("picker-browse", "Browse…")
-                    .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
-                        this.browse(cx);
-                    }))
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-
+        let path_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(theme::space_sm())
+            .child(button("picker-parent", "上一级").on_click(cx.listener(
+                |this, _ev: &ClickEvent, window, cx| {
+                    this.go_parent(window, cx);
+                },
+            )))
+            .child(div().flex_1().min_w_0().child(input_el));
         let list = self.render_list(cx);
 
-        // 底部按钮行:Browse(本地模式)+ Cancel。
-        let mut buttons: Vec<AnyElement> = Vec::new();
-        if let Some(b) = browse_el {
-            buttons.push(b);
-        }
-        buttons.push(
+        let buttons: Vec<AnyElement> = vec![
             button("picker-cancel", "取消")
                 .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
                     this.dismiss(cx);
                 }))
                 .into_any_element(),
-        );
+            button("picker-confirm", "选择此目录")
+                .variant(ButtonVariant::Confirm)
+                .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
+                    this.confirm(cx);
+                }))
+                .into_any_element(),
+        ];
 
         let key_handler = cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
             let key = ev.keystroke.key.as_str();
@@ -532,7 +519,7 @@ impl Render for PathPicker {
                     cx.stop_propagation();
                 }
                 "tab" => {
-                    this.confirm_completion(window, cx);
+                    this.enter_selected(window, cx);
                     cx.stop_propagation();
                 }
                 "enter" => {
@@ -588,9 +575,9 @@ impl Render for PathPicker {
                     .child(
                         div()
                             .text_color(rgb(theme::TEXT_BRIGHT))
-                            .child(SharedString::from("打开仓库")),
+                            .child(SharedString::from("选择仓库目录")),
                     )
-                    .child(input_el)
+                    .child(path_row)
                     .child(list)
                     .child(button_row(buttons)),
             )
@@ -646,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_entries_empty_suffix_returns_all() {
+    fn filter_entries_empty_suffix_returns_directories_only() {
         let entries = vec![
             DirEntry {
                 name: "src".into(),
@@ -658,7 +645,7 @@ mod tests {
             },
         ];
         let filtered = filter_entries(&entries, "");
-        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered, vec![0]);
     }
 
     #[test]
@@ -685,10 +672,10 @@ mod tests {
     #[test]
     fn filter_entries_case_insensitive() {
         let entries = vec![DirEntry {
-            name: "README.md".into(),
-            is_dir: false,
+            name: "Documents".into(),
+            is_dir: true,
         }];
-        let filtered = filter_entries(&entries, "READ");
+        let filtered = filter_entries(&entries, "DOC");
         assert_eq!(filtered.len(), 1);
     }
 
@@ -718,5 +705,19 @@ mod tests {
     fn complete_path_windows_separator() {
         let path = complete_path(r"C:\Users\", "Doc", true, '\\');
         assert_eq!(path, r"C:\Users\Doc\");
+    }
+
+    #[test]
+    fn parent_directory_posix() {
+        assert_eq!(parent_directory("/home/user/", '/'), "/home/");
+        assert_eq!(parent_directory("/home/", '/'), "/");
+        assert_eq!(parent_directory("/", '/'), "/");
+    }
+
+    #[test]
+    fn parent_directory_windows() {
+        assert_eq!(parent_directory(r"C:\Users\rain\", '\\'), r"C:\Users\");
+        assert_eq!(parent_directory(r"C:\Users\", '\\'), r"C:\");
+        assert_eq!(parent_directory(r"C:\", '\\'), r"C:\");
     }
 }
