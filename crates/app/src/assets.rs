@@ -3,7 +3,7 @@
 //! GPUI 的 `svg()` 元素通过 `AssetSource` 按路径加载资源。原生 app 不能引在线
 //! URL,所以把 SVG 用 `include_bytes!` 编译进二进制,随 app 分发、免外部文件。
 //!
-//! 图标来自 Lucide / lobehub，使用 `currentColor`，可跟主题染色。
+//! 品牌图标来自 lobehub，界面图标采用 Lucide；单色 SVG 可跟主题染色。
 
 use std::borrow::Cow;
 
@@ -27,6 +27,10 @@ const MESSAGE_WARNING_SVG: &[u8] = include_bytes!("../assets/icons/message-circl
 const GIT_MERGE_SVG: &[u8] = include_bytes!("../assets/icons/git-merge.svg");
 const CIRCLE_DRAFT_SVG: &[u8] = include_bytes!("../assets/icons/circle-dot-dashed.svg");
 const CIRCLE_DOT_SVG: &[u8] = include_bytes!("../assets/icons/circle-dot.svg");
+const ARROW_LEFT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-left.svg");
+const ARROW_RIGHT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-right.svg");
+const ARROW_UP_SVG: &[u8] = include_bytes!("../assets/icons/arrow-up.svg");
+const REFRESH_CW_SVG: &[u8] = include_bytes!("../assets/icons/refresh-cw.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -51,6 +55,10 @@ impl AssetSource for Assets {
             "icons/git-merge.svg" => Some(GIT_MERGE_SVG),
             "icons/circle-dot-dashed.svg" => Some(CIRCLE_DRAFT_SVG),
             "icons/circle-dot.svg" => Some(CIRCLE_DOT_SVG),
+            "icons/arrow-left.svg" => Some(ARROW_LEFT_SVG),
+            "icons/arrow-right.svg" => Some(ARROW_RIGHT_SVG),
+            "icons/arrow-up.svg" => Some(ARROW_UP_SVG),
+            "icons/refresh-cw.svg" => Some(REFRESH_CW_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -75,6 +83,10 @@ impl AssetSource for Assets {
             SharedString::from("icons/git-merge.svg"),
             SharedString::from("icons/circle-dot-dashed.svg"),
             SharedString::from("icons/circle-dot.svg"),
+            SharedString::from("icons/arrow-left.svg"),
+            SharedString::from("icons/arrow-right.svg"),
+            SharedString::from("icons/arrow-up.svg"),
+            SharedString::from("icons/refresh-cw.svg"),
         ])
     }
 }

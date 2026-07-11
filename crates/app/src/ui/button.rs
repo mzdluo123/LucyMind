@@ -5,9 +5,10 @@
 //! 文字染成极克制的冷红/冷绿,底仍是深灰。
 
 use gpui::{
-    div, prelude::*, px, rgb, ClickEvent, ElementId, IntoElement, SharedString, Stateful, Styled,
-    Window,
+    div, prelude::*, px, rgb, App, ClickEvent, ElementId, IntoElement, SharedString, Stateful,
+    Styled, Window,
 };
+use gpui_component::tooltip::Tooltip;
 
 use crate::theme;
 
@@ -55,6 +56,91 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Butto
         variant: ButtonVariant::Neutral,
         icon: None,
         on_click: None,
+    }
+}
+
+/// 固定尺寸的图标按钮，适合导航和工具栏动作。
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    tooltip: impl Into<SharedString>,
+) -> IconButton {
+    IconButton {
+        id: id.into(),
+        icon: icon.into(),
+        tooltip: tooltip.into(),
+        disabled: false,
+        on_click: None,
+    }
+}
+
+pub struct IconButton {
+    id: ElementId,
+    icon: SharedString,
+    tooltip: SharedString,
+    disabled: bool,
+    on_click: Option<ClickHandler>,
+}
+
+impl IconButton {
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        if !self.disabled {
+            self.on_click = Some(Box::new(handler));
+        }
+        self
+    }
+}
+
+impl IntoElement for IconButton {
+    type Element = Stateful<gpui::Div>;
+
+    fn into_element(self) -> Self::Element {
+        let disabled = self.disabled;
+        let tooltip = self.tooltip;
+        let mut element = div()
+            .id(self.id)
+            .flex_none()
+            .size(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .rounded(theme::radius())
+            .bg(rgb(theme::BTN_BG))
+            .text_color(rgb(if disabled {
+                theme::TEXT_FAINT
+            } else {
+                theme::TEXT
+            }))
+            .when(!disabled, |this| {
+                this.cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            })
+            .child(
+                gpui::svg()
+                    .size(px(16.0))
+                    .path(self.icon)
+                    .text_color(rgb(if disabled {
+                        theme::TEXT_FAINT
+                    } else {
+                        theme::TEXT
+                    })),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx));
+
+        if let Some(handler) = self.on_click {
+            element = element.on_click(handler);
+        }
+        element
     }
 }
 

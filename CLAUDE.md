@@ -43,6 +43,7 @@ cargo test -p lucy-app --test new_worktree # 单个文件
 ```
 
 **关键约定:**
+- **每次新增功能都必须在同一个变更中补充相关自动化测试和端到端测试。** 只有实现、相关测试与端到端测试全部完成并通过后,该功能才算完成。
 - `#[gpui::test]` 异步测试签名为 `async fn(cx: &mut TestAppContext)`。
 - `tests/common/mod.rs` 提供 `temp_repo()`(临时 git 仓库)、`build_workspace(cx, repo)`
   (headless 构造 `WorkspaceView`)、`wait_for(cx, predicate, timeout)`(轮询异步完成)、
