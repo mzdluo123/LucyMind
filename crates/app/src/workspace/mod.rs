@@ -28,6 +28,7 @@ use gpui::{
 use lucy_core::agent::AgentSpec;
 use lucy_core::config::{self, WorktreeConfig};
 use lucy_core::git::{self, CreateMode, WorktreeEntry};
+use lucy_core::github::{self, PullRequest};
 use lucy_core::hooks::{self, HookContext, LifecycleEvent};
 #[cfg(feature = "test-support")]
 use lucy_core::host::LocalHost;
@@ -185,6 +186,10 @@ pub struct WorkspaceView {
     /// 当前显示在主区的 worktree 路径(不是 tab 索引;tab 级 active 存在 group 里)。
     active: Option<PathBuf>,
     status: Option<Status>,
+    /// 当前 active worktree branch 对应的 GitHub PR。无 PR/查询失败时为 None。
+    pull_request: Option<PullRequest>,
+    /// PR 异步查询代次；只接受最新代次的返回值，避免切分支后的迟到响应覆盖 UI。
+    pull_request_request: u64,
     /// 待确认的关闭(有未提交改动时弹窗)。
     pending_close: Option<PendingClose>,
     /// 侧边栏宽度(可拖 splitter 调整)。
@@ -271,6 +276,8 @@ impl WorkspaceView {
             terminals: std::collections::HashMap::new(),
             active: None,
             status: None,
+            pull_request: None,
+            pull_request_request: 0,
             pending_close: None,
             sidebar_width: SIDEBAR_DEFAULT_W,
             dragging_splitter: false,
@@ -294,6 +301,8 @@ impl WorkspaceView {
         // 先设 repo,list_worktrees_canon 依赖它。
         self.repo = Some(repo.clone());
         self.worktrees = self.list_worktrees_canon();
+        self.pull_request = None;
+        self.pull_request_request = self.pull_request_request.wrapping_add(1);
     }
 
     /// 弹出 Zed 风格的路径输入选择器(PathPicker):文本输入 + 实时目录补全。
@@ -407,8 +416,44 @@ impl WorkspaceView {
                 },
             );
         }
-        self.active = Some(wt_path);
+        self.active = Some(wt_path.clone());
+        self.refresh_pull_request(wt_path, cx);
         cx.notify();
+    }
+
+    /// 后台查询 active worktree 当前 branch 的 GitHub PR。
+    ///
+    /// 查询是可选增强：无 PR、gh 不可用或任何错误都折叠为 None，不写动作状态。
+    fn refresh_pull_request(&mut self, wt_path: PathBuf, cx: &mut Context<Self>) {
+        self.pull_request = None;
+        self.pull_request_request = self.pull_request_request.wrapping_add(1);
+        let request = self.pull_request_request;
+        let host = self.host.clone();
+        let query_path = wt_path.clone();
+
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let pull_request = cx
+                    .background_executor()
+                    .spawn(async move { github::current_pull_request(host.as_ref(), &query_path) })
+                    .await;
+
+                let _ = this.update(cx, |view, cx| {
+                    let still_active = view.active.as_deref() == Some(wt_path.as_path());
+                    if view.pull_request_request == request && still_active {
+                        view.pull_request = pull_request;
+                        cx.notify();
+                    }
+                });
+            },
+        )
+        .detach();
+    }
+
+    fn open_pull_request(&self, cx: &mut Context<Self>) {
+        if let Some(pull_request) = &self.pull_request {
+            cx.open_url(&pull_request.url);
+        }
     }
 
     /// 起一个 shell 终端 tab(cwd = worktree 路径,注入 TERM + worktree env)。
@@ -580,7 +625,8 @@ impl WorkspaceView {
                 active_tab: 0,
             },
         );
-        self.active = Some(wt_key);
+        self.active = Some(wt_key.clone());
+        self.refresh_pull_request(wt_key, cx);
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
         let _ = git::lock(self.host.as_ref(), &repo, &wt_path, Some("agent running"));
@@ -707,6 +753,12 @@ impl WorkspaceView {
             .is_some_and(|a| same_path(self.host.as_ref(), a, &wt_path))
         {
             self.active = self.terminals.keys().next().cloned();
+        }
+        if let Some(active) = self.active.clone() {
+            self.refresh_pull_request(active, cx);
+        } else {
+            self.pull_request = None;
+            self.pull_request_request = self.pull_request_request.wrapping_add(1);
         }
         self.worktrees
             .retain(|w| !same_path(self.host.as_ref(), &w.path, &wt_path));
@@ -924,6 +976,32 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn current_status(&self) -> Option<&str> {
         self.status.as_ref().map(|s| s.text.as_ref())
+    }
+
+    /// 当前 active branch 的 GitHub PR。
+    #[cfg(feature = "test-support")]
+    pub fn current_pull_request(&self) -> Option<&PullRequest> {
+        self.pull_request.as_ref()
+    }
+
+    /// 注入 PR 状态，供 headless UI 状态测试使用。
+    #[cfg(feature = "test-support")]
+    pub fn set_pull_request_for_test(&mut self, pull_request: Option<PullRequest>) {
+        self.pull_request = pull_request;
+    }
+
+    /// 在默认浏览器打开当前 PR，供 headless 测试验证 URL。
+    #[cfg(feature = "test-support")]
+    pub fn open_pull_request_for_test(&self, cx: &mut Context<Self>) {
+        self.open_pull_request(cx);
+    }
+
+    /// 当前 PR 状态对应的 Lucide 图标路径。
+    #[cfg(feature = "test-support")]
+    pub fn pull_request_status_icon_for_test(&self) -> Option<&'static str> {
+        self.pull_request
+            .as_ref()
+            .map(|pr| status_bar::pull_request_status_icon(pr.status()).0)
     }
 
     /// 当前状态是否为错误。
@@ -1199,7 +1277,7 @@ impl Render for WorkspaceView {
             .flex_col()
             .child(self.tab_bar(cx))
             .child(term_area)
-            .child(self.status_bar());
+            .child(self.status_bar(cx));
 
         // 分隔条(splitter):侧边栏与主区之间,可拖调宽度。
         let splitter = div()
