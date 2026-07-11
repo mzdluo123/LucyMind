@@ -1,8 +1,9 @@
-# Release: 构建 macOS / Windows release 产物,打 tag 时自动发布 GitHub Release。
+# Release: 构建 macOS / Windows / Linux release 产物,打 tag 时自动发布 GitHub Release。
 #
 # 产物:
 # - macOS: cargo build --release → LucyMind.app(cargo-bundle 补 Info.plist)
 # - Windows: cargo build --release → lucy.exe(压缩成 zip)
+# - Linux: cargo bundle --release --format deb → Debian 安装包
 #
 # 触发:推送 v* tag(如 v0.1.0)。
 name: Release
@@ -15,8 +16,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify-release:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag version and source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "lucy-app") | .version'
+          )"
+          expected_tag="v${package_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match lucy-app ${package_version}." >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "Release commit ${GITHUB_SHA} is not on origin/main." >&2
+            exit 1
+          fi
+
   release-macos:
     name: Release (macOS)
+    needs: verify-release
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,12 +68,15 @@ jobs:
         run: cargo bundle --release -p lucy-app
         timeout-minutes: 10
 
-      - name: Create dmg archive
+      - name: Create zip archive
         run: |
           # cargo-bundle 把 .app 产出到 target/release/bundle/osx/,不是 release 根目录。
           cd target/release/bundle/osx
           # 把 LucyMind.app 打成 zip(GitHub Release 不支持 dmg 上传的权限问题)。
           ditto -c -k --keepParent LucyMind.app LucyMind-macos.zip
+
+      - name: Verify archive
+        run: unzip -t target/release/bundle/osx/LucyMind-macos.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -52,6 +86,7 @@ jobs:
 
   release-windows:
     name: Release (Windows)
+    needs: verify-release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,15 +105,65 @@ jobs:
           cd target/release
           7z a LucyMind-windows.zip lucy.exe
 
+      - name: Verify archive
+        run: 7z t target/release/LucyMind-windows.zip
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: LucyMind-windows
           path: target/release/LucyMind-windows.zip
 
+  release-linux:
+    name: Release (Linux x86_64)
+    needs: verify-release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxext-dev libxft-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libdbus-1-dev libfontconfig-dev \
+            libfreetype6-dev libgbm-dev libegl-dev libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Debian package
+        run: cargo bundle --release -p lucy-app --format deb
+        timeout-minutes: 30
+
+      - name: Normalize package name
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(find target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "${package}"
+          cp "${package}" target/release/LucyMind-linux-x86_64.deb
+
+      - name: Verify package
+        run: |
+          dpkg-deb --info target/release/LucyMind-linux-x86_64.deb
+          dpkg-deb --contents target/release/LucyMind-linux-x86_64.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LucyMind-linux-x86_64
+          path: target/release/LucyMind-linux-x86_64.deb
+
   publish-release:
     name: Publish GitHub Release
-    needs: [release-macos, release-windows]
+    needs: [release-macos, release-windows, release-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,3 +182,4 @@ jobs:
           files: |
             artifacts/LucyMind-macos/LucyMind-macos.zip
             artifacts/LucyMind-windows/LucyMind-windows.zip
+            artifacts/LucyMind-linux-x86_64/LucyMind-linux-x86_64.deb
