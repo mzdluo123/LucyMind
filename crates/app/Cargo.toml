@@ -33,6 +33,9 @@ gpui = "0.2.2"
 env_logger = "0.11"
 gpui-component = "0.5.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 # 集成测试:`test-support` 解锁 gpui 的 TestAppContext / #[gpui::test] /
 # VisualTestContext(headless,无需真实 GPU/窗口)。tempfile 造临时 git 仓库。
 # 自引用启用本 crate 的 test-support feature,让 tests/ 能用内部 accessor。

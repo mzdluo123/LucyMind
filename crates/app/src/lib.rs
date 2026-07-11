@@ -5,6 +5,7 @@
 //! 做 headless UI 测试。
 
 pub mod assets;
+pub mod logging;
 mod path_env;
 pub mod terminal_view;
 pub mod theme;
@@ -27,14 +28,6 @@ use workspace::WorkspaceView;
 /// bin 与测试 harness 共用此入口:bin 直接调用;测试 harness 不调用此函数
 /// (它用 `TestAppContext` 自建窗口),但保留此函数让 bin 瘦身。
 pub fn run() {
-    // 默认:第三方 crate 只 warn,我们自己的 crate 开 info(能看到 [close] 计时
-    // 日志,又不被 gpui/wgpu 的 info 刷屏)。仍可被 RUST_LOG 覆盖。
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("warn,lucy_app=info,lucy_terminal=info,lucy_core=info"),
-    )
-    .init();
-
     // 修复 PATH:从 .app(Finder/Dock)启动时进程 PATH 极简,不含用户 shell 里
     // 加的目录(claude/codex 常装在 ~/.local/bin、/opt/homebrew/bin)。这里趁
     // GPUI 尚未起线程(单线程,改 env 安全)从登录 shell 取回完整 PATH,后续起的

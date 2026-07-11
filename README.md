@@ -49,6 +49,10 @@ cargo run -p lucy-app
 
 从目标仓库目录运行 LucyMind 时，应用会直接打开该仓库；从其他目录或 `.app` 启动时，可以在界面中选择 Git 仓库。
 
+排查问题时可用 `lucy --debug-log` 将详细日志追加保存到平台日志目录
+（macOS 为 `~/Library/Logs/LucyMind/lucy.log`）。也可以用
+`lucy --debug-log /path/to/lucy.log` 指定日志文件；`RUST_LOG` 仍可覆盖日志级别。
+
 macOS 可以打包为标准应用：
 
 ```bash

@@ -21,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 portable-pty = "0.9"
 log = "0.4"
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 # workspace 内部 crate
 lucy-core = { path = "crates/core" }

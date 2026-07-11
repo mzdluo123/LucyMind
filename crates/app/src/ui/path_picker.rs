@@ -76,7 +76,21 @@ pub(crate) fn parent_directory(dir: &str, separator: char) -> String {
     let is_separator = |c| c == separator || (separator == '\\' && c == '/');
     let trimmed = dir.trim_end_matches(is_separator);
     if trimmed.is_empty() {
-        return separator.to_string();
+        return if separator == '\\' {
+            String::new()
+        } else {
+            separator.to_string()
+        };
+    }
+    // Windows drive roots have a virtual parent ("This PC") represented by
+    // an empty query. That makes other drive letters reachable without a
+    // separate native file dialog.
+    if separator == '\\'
+        && trimmed.len() == 2
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.as_bytes()[1] == b':'
+    {
+        return String::new();
     }
     let Some(index) = trimmed.rfind(is_separator) else {
         return dir.to_string();
@@ -86,6 +100,28 @@ pub(crate) fn parent_directory(dir: &str, separator: char) -> String {
         separator.to_string()
     } else {
         parent.to_string()
+    }
+}
+
+/// Converts the bitmask returned by Windows `GetLogicalDrives` into picker entries.
+pub(crate) fn drive_entries(mask: u32) -> Vec<DirEntry> {
+    (0..26)
+        .filter(|bit| mask & (1 << bit) != 0)
+        .map(|bit| DirEntry {
+            name: format!("{}:", (b'A' + bit as u8) as char),
+            is_dir: true,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_entries() -> std::io::Result<Vec<DirEntry>> {
+    // GetLogicalDrives is a side-effect-free query returning one bit per drive letter.
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    if mask == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(drive_entries(mask))
     }
 }
 
@@ -329,6 +365,20 @@ impl PathPicker {
             self.state.filtered.clear();
             self.state.selected_index = 0;
             cx.notify();
+
+            #[cfg(target_os = "windows")]
+            if !self.host.is_remote() && dir.is_empty() && suffix.is_empty() {
+                self.state.loading = false;
+                match windows_drive_entries() {
+                    Ok(entries) => {
+                        self.state.entries = entries;
+                        self.state.filtered = filter_entries(&self.state.entries, "");
+                    }
+                    Err(error) => self.state.error = Some(format!("{error}")),
+                }
+                cx.notify();
+                return;
+            }
 
             // 后台 list_dir。
             let host = self.host.clone();
@@ -754,6 +804,14 @@ impl PathPicker {
     pub fn confirm_for_test(&mut self, cx: &mut Context<Self>) {
         self.confirm(cx);
     }
+
+    pub fn go_parent_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_parent(window, cx);
+    }
+
+    pub fn enter_selected_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_selected(window, cx);
+    }
 }
 
 // ───────────────────────────── 测试 ─────────────────────────────
@@ -890,6 +948,15 @@ mod tests {
     fn parent_directory_windows() {
         assert_eq!(parent_directory(r"C:\Users\rain\", '\\'), r"C:\Users\");
         assert_eq!(parent_directory(r"C:\Users\", '\\'), r"C:\");
-        assert_eq!(parent_directory(r"C:\", '\\'), r"C:\");
+        assert_eq!(parent_directory(r"C:\", '\\'), "");
+        assert_eq!(parent_directory("", '\\'), "");
+    }
+
+    #[test]
+    fn drive_mask_becomes_sorted_drive_entries() {
+        let entries = drive_entries((1 << 0) | (1 << 2) | (1 << 25));
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["A:", "C:", "Z:"]);
+        assert!(entries.iter().all(|entry| entry.is_dir));
     }
 }
