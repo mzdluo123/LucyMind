@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{point, px, size, TestAppContext};
 
 use common::{build_workspace, shutdown_workspace, wait_for};
 
@@ -63,6 +63,11 @@ async fn drive_root_parent_lists_drives_and_can_reenter_a_drive(cx: &mut TestApp
     window.update(|window, cx| {
         picker.update(cx, |picker, cx| picker.enter_selected_for_test(window, cx));
     });
+    wait_for(
+        window,
+        |cx| cx.read(|cx| !picker.read(cx).is_loading()),
+        Duration::from_secs(5),
+    );
     let selected_root = window.update(|_window, cx| picker.read(cx).query(cx));
     assert_eq!(
         PathBuf::from(&selected_root).ancestors().count(),
@@ -70,6 +75,16 @@ async fn drive_root_parent_lists_drives_and_can_reenter_a_drive(cx: &mut TestApp
         "selecting a drive should enter its root: {selected_root}"
     );
     assert!(selected_root.ends_with('\\'));
+
+    window.draw(
+        point(px(0.0), px(0.0)),
+        size(px(1100.0), px(680.0)),
+        |_, _| workspace.clone(),
+    );
+    let icon_bounds = window
+        .debug_bounds("picker-entry-icon-0")
+        .expect("drive root should render at least one directory icon");
+    assert_eq!(icon_bounds.size, size(px(16.0), px(16.0)));
 
     shutdown_workspace(window, &workspace);
 }

@@ -1,5 +1,6 @@
 //! Command-line options and persistent application logging.
 
+use std::backtrace::Backtrace;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -94,6 +95,15 @@ pub fn init(debug_log: Option<&Path>) -> io::Result<Option<PathBuf>> {
         },
     ));
 
+    let default_format = env_logger::fmt::ConfigurableFormat::default();
+    builder.format(move |buf, record| {
+        default_format.format(buf, record)?;
+        if record.level() == log::Level::Error {
+            writeln!(buf, "stacktrace:\n{}", Backtrace::force_capture())?;
+        }
+        Ok(())
+    });
+
     let log_path = if let Some(path) = debug_log {
         if let Some(parent) = path
             .parent()
@@ -177,5 +187,20 @@ mod tests {
     fn rejects_unknown_arguments_and_empty_paths() {
         assert!(StartupOptions::parse(args(&["--wat"])).is_err());
         assert!(StartupOptions::parse(args(&["--debug-log="])).is_err());
+    }
+
+    #[test]
+    fn error_logs_include_a_forced_stacktrace() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("error.log");
+        init(Some(&path)).unwrap();
+
+        log::error!(target: "lucy_app", "ERROR_WITH_STACKTRACE");
+        log::logger().flush();
+
+        let output = std::fs::read_to_string(path).unwrap();
+        assert!(output.contains("ERROR_WITH_STACKTRACE"));
+        assert!(output.contains("stacktrace:"));
+        assert!(output.contains("logging::tests::error_logs_include_a_forced_stacktrace"));
     }
 }

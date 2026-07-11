@@ -559,7 +559,9 @@ impl PathPicker {
             .text_color(rgb(theme::TEXT))
             .child(
                 gpui::svg()
+                    .flex_none()
                     .size(px(16.0))
+                    .debug_selector(move || format!("picker-entry-icon-{i}"))
                     .path("icons/folder-open.svg")
                     .text_color(rgb(theme::TEXT_DIM)),
             )
