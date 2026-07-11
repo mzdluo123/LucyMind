@@ -264,7 +264,13 @@ impl WorkspaceView {
 
     /// 公共构造:填默认字段(不弹 prompt、不 set_repo)。
     fn construct(cx: &mut Context<Self>, host: Arc<dyn Host>) -> Self {
-        let registry = Registry::load_default().unwrap_or_default();
+        let registry = match Registry::load_default() {
+            Ok(registry) => registry,
+            Err(error) => {
+                log::error!("加载 session 注册表失败: {error}");
+                Registry::default()
+            }
+        };
         Self {
             repo: None,
             host,
@@ -547,10 +553,11 @@ impl WorkspaceView {
     }
 
     fn set_status(&mut self, text: impl Into<SharedString>, is_error: bool) {
-        self.status = Some(Status {
-            text: text.into(),
-            is_error,
-        });
+        let text = text.into();
+        if is_error {
+            log::error!("{}", text.as_ref());
+        }
+        self.status = Some(Status { text, is_error });
     }
 
     fn refresh_worktrees(&mut self) {
@@ -566,7 +573,13 @@ impl WorkspaceView {
         let Some(repo) = &self.repo else {
             return Vec::new();
         };
-        let mut list = git::list(self.host.as_ref(), repo).unwrap_or_default();
+        let mut list = match git::list(self.host.as_ref(), repo) {
+            Ok(list) => list,
+            Err(error) => {
+                log::error!("读取 worktree 列表失败({}): {error}", repo.display());
+                Vec::new()
+            }
+        };
         for wt in &mut list {
             wt.path = canon(self.host.as_ref(), &wt.path);
         }
@@ -629,6 +642,13 @@ impl WorkspaceView {
             |_step| {},
         );
         if run.had_failure() {
+            for step in run.steps.iter().filter(|step| !step.success) {
+                log::error!(
+                    "postCreate hook 失败({}): {}",
+                    step.description,
+                    step.message.as_deref().unwrap_or("未知错误")
+                );
+            }
             self.set_status(
                 "worktree 已建,但 postCreate hook 有失败步骤(见日志)".to_string(),
                 true,

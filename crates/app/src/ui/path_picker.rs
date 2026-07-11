@@ -261,8 +261,14 @@ impl PathPicker {
 
     /// 设置错误信息(确认失败时调用)。
     pub fn set_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        self.state.error = Some(msg.to_string());
+        self.store_error(msg);
         cx.notify();
+    }
+
+    fn store_error(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        log::error!("{msg}");
+        self.state.error = Some(msg);
     }
 
     /// 过滤后条目数。
@@ -374,7 +380,9 @@ impl PathPicker {
                         self.state.entries = entries;
                         self.state.filtered = filter_entries(&self.state.entries, "");
                     }
-                    Err(error) => self.state.error = Some(format!("{error}")),
+                    Err(error) => {
+                        self.store_error(format!("读取 Windows 盘符失败: {error}"));
+                    }
                 }
                 cx.notify();
                 return;
@@ -401,7 +409,7 @@ impl PathPicker {
                             this.state.selected_index = 0;
                         }
                         Err(e) => {
-                            this.state.error = Some(format!("{e}"));
+                            this.store_error(format!("列出目录 {} 失败: {e}", this.state.dir));
                             this.state.entries.clear();
                             this.state.filtered.clear();
                         }
