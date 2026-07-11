@@ -104,6 +104,7 @@ pub(crate) fn parent_directory(dir: &str, separator: char) -> String {
 }
 
 /// Converts the bitmask returned by Windows `GetLogicalDrives` into picker entries.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn drive_entries(mask: u32) -> Vec<DirEntry> {
     (0..26)
         .filter(|bit| mask & (1 << bit) != 0)
