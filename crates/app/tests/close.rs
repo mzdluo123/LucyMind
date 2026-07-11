@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use gpui::TestAppContext;
 
-use common::{build_workspace, shutdown_workspace, temp_repo_with_agent, wait_for};
+use common::{
+    build_workspace, shutdown_workspace, temp_repo_with_agent, wait_for, wait_for_shell_ready,
+};
 
 mod common;
 
@@ -104,6 +106,7 @@ async fn cancel_close_keeps_worktree(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let wt_path = create_worktree(cx, &workspace, &repo);
+    wait_for_shell_ready(cx, &workspace, &wt_path, Duration::from_secs(15));
     std::fs::write(wt_path.join("dirty.txt"), "uncommitted\n").unwrap();
 
     cx.update(|cx| {
@@ -123,6 +126,29 @@ async fn cancel_close_keeps_worktree(cx: &mut TestAppContext) {
     assert!(
         cx.update(|cx| workspace.update(cx, |v, _| v.terminals_contains(&wt_path))),
         "terminal should remain after cancel_close"
+    );
+
+    // 不仅 terminal 实体还在,底层 PTY 也必须仍能执行命令。
+    let terminal = cx
+        .update(|cx| workspace.update(cx, |v, _| v.terminal_at(&wt_path).cloned()))
+        .expect("terminal should remain after cancel_close");
+    cx.update(|cx| {
+        terminal.update(cx, |terminal, _| {
+            terminal.send_text("echo CANCEL_CLOSE_TERMINAL_\"\"ALIVE\r")
+        });
+    });
+    wait_for(
+        cx,
+        |cx| {
+            cx.update(|cx| terminal.update(cx, |terminal, _| terminal.poll_events_for_test()));
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .snapshot_text()
+                    .contains("CANCEL_CLOSE_TERMINAL_ALIVE")
+            })
+        },
+        Duration::from_secs(15),
     );
 
     shutdown_workspace(cx, &workspace);

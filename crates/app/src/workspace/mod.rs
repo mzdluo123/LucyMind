@@ -606,17 +606,20 @@ impl WorkspaceView {
 
     // ---------------- 关闭 worktree ----------------
 
-    /// 请求关闭:先停所有 tab 的终端 + 检查未提交改动。干净 → 直接关;脏 → 弹确认。
+    /// 请求关闭:检查未提交改动。干净 → 直接关;脏 → 弹确认。
+    ///
+    /// 此阶段不能停终端:用户可能取消关闭。终端 shutdown 统一由 `do_close`
+    /// 在确认真正关闭后执行。
     fn request_close(&mut self, wt_path: PathBuf, branch: String, cx: &mut Context<Self>) {
-        // 先停掉该 worktree 的所有 tab 终端(两段式)。用规范化 key 查。
-        if let Some(group) = self.terminals.get(&canon(self.host.as_ref(), &wt_path)) {
-            for tab in &group.tabs {
-                tab.terminal.update(cx, |t, _| t.shutdown());
-            }
-        }
-
         // 检查未提交改动。
-        let dirty = git::has_uncommitted_changes(self.host.as_ref(), &wt_path).unwrap_or(false);
+        let dirty = match git::has_uncommitted_changes(self.host.as_ref(), &wt_path) {
+            Ok(dirty) => dirty,
+            Err(e) => {
+                self.set_status(format!("检查 worktree 状态失败:{e}"), true);
+                cx.notify();
+                return;
+            }
+        };
 
         if dirty {
             let count = count_uncommitted(self.host.as_ref(), &wt_path);
@@ -662,6 +665,15 @@ impl WorkspaceView {
             return;
         }
 
+        // 已确定执行关闭,此时才停掉该 worktree 的所有终端。脏 worktree 在用户
+        // 确认前不会走到这里,因此取消关闭不会杀掉仍在使用的 shell/agent。
+        let key = canon(self.host.as_ref(), &wt_path);
+        if let Some(group) = self.terminals.get(&key) {
+            for tab in &group.tabs {
+                tab.terminal.update(cx, |t, _| t.shutdown());
+            }
+        }
+
         // 找分支名(供 hook 环境变量 + 状态提示)。
         let branch = self
             .registry
@@ -688,7 +700,6 @@ impl WorkspaceView {
         );
 
         // 2) 乐观 UI:立即从终端表/active/列表移除该项,界面瞬间响应。
-        let key = canon(self.host.as_ref(), &wt_path);
         self.terminals.remove(&key);
         if self
             .active
