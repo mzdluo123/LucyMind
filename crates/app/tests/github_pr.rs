@@ -13,6 +13,10 @@ use common::{build_workspace_with_host, shutdown_workspace, temp_repo, wait_for}
 
 mod common;
 
+fn canonical_path(path: &Path) -> PathBuf {
+    LocalHost.canonicalize(path).unwrap()
+}
+
 struct PrFixtureHost {
     local: LocalHost,
     responses: HashMap<PathBuf, (u64, Duration)>,
@@ -111,7 +115,7 @@ impl Host for PrFixtureHost {
 #[gpui::test]
 async fn displays_pr_for_active_worktree(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo();
-    let repo = repo.canonicalize().unwrap();
+    let repo = canonical_path(&repo);
     let host = Arc::new(PrFixtureHost::new([(repo.clone(), (42, Duration::ZERO))]));
     let (workspace, _window) = build_workspace_with_host(cx, Some(repo.clone()), host.clone());
 
@@ -145,7 +149,7 @@ async fn displays_pr_for_active_worktree(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn missing_pr_is_silent(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo();
-    let repo = repo.canonicalize().unwrap();
+    let repo = canonical_path(&repo);
     let host = Arc::new(PrFixtureHost::new([]));
     let (workspace, _window) = build_workspace_with_host(cx, Some(repo.clone()), host.clone());
 
@@ -168,7 +172,7 @@ async fn missing_pr_is_silent(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn stale_pr_response_cannot_replace_new_active_worktree(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo();
-    let repo = repo.canonicalize().unwrap();
+    let repo = canonical_path(&repo);
     let wt = repo.parent().unwrap().join("second-worktree");
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -184,7 +188,7 @@ async fn stale_pr_response_cannot_replace_new_active_worktree(cx: &mut TestAppCo
         .status()
         .unwrap();
     assert!(status.success());
-    let wt = wt.canonicalize().unwrap();
+    let wt = canonical_path(&wt);
 
     let host = Arc::new(PrFixtureHost::new([
         (repo.clone(), (1, Duration::from_millis(150))),
