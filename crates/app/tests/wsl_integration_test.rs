@@ -16,7 +16,9 @@ use std::time::Duration;
 use gpui::TestAppContext;
 
 use common::{build_workspace_with_host, shutdown_workspace, wait_for};
-use lucy_core::host::{Host, LocalHost, WslHost};
+#[cfg(target_os = "windows")]
+use lucy_core::host::LocalHost;
+use lucy_core::host::{Host, WslHost};
 
 mod common;
 
