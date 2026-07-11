@@ -3,7 +3,8 @@
 //! 参考 Zed 的 `OpenPathPrompt`(`crates/open_path_prompt/src/open_path_prompt.rs`):
 //! 用户输入路径,系统切分出「目录部分」(list_dir 参数)和「后缀」(过滤词),
 //! 后台异步列目录,cancel-flag 取消旧任务,前台显示过滤后的条目。
-//! 列表只显示目录；单击选中、双击或 Tab 进入，Enter 确认输入的路径。
+//! 列表只显示目录；支持后退、前进、上一级和刷新。单击选中、双击或 Tab
+//! 进入目录，Enter 确认输入的路径。
 //!
 //! 与 Zed 的差异:
 //! - 不依赖 Zed 的 `picker` / `workspace` crate(GPUI 0.2.2 + gpui-component 0.5.1)。
@@ -25,7 +26,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use lucy_core::host::{DirEntry, Host};
 
 use crate::theme;
-use crate::ui::{button, button_row, ButtonVariant};
+use crate::ui::{button, button_row, icon_button, ButtonVariant};
 
 // ───────────────────────────── 纯逻辑函数 ─────────────────────────────
 
@@ -149,6 +150,9 @@ pub struct PathPicker {
     separator: char,
     /// focus handle。
     focus: FocusHandle,
+    /// 目录导航历史，不记录输入框中的过滤文本。
+    back_history: Vec<String>,
+    forward_history: Vec<String>,
 }
 
 impl PathPicker {
@@ -171,7 +175,7 @@ impl PathPicker {
         // 创建 InputState,预填 initial_query。
         let query = initial_query.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("[directory/]filename");
+            let mut state = InputState::new(window, cx).placeholder("输入仓库目录路径");
             state.set_value(query.clone(), window, cx);
             state.focus(window, cx);
             state
@@ -193,6 +197,8 @@ impl PathPicker {
             input,
             separator,
             focus: cx.focus_handle(),
+            back_history: Vec::new(),
+            forward_history: Vec::new(),
         };
 
         // 触发初始 update_matches(列初始目录)。
@@ -256,13 +262,17 @@ impl PathPicker {
 
     /// 更新补全列表:切分 dir/suffix,dir 变化时后台 list_dir,suffix 变化时只过滤。
     fn update_matches(&mut self, query: String, cx: &mut Context<Self>) {
+        self.update_matches_inner(query, false, cx);
+    }
+
+    fn update_matches_inner(&mut self, query: String, force_reload: bool, cx: &mut Context<Self>) {
         let (dir, suffix) = get_dir_and_suffix(&query, self.separator);
 
         // 清除错误(用户继续输入)。
         self.state.error = None;
         self.state.query = query;
 
-        let dir_changed = dir != self.state.dir;
+        let dir_changed = force_reload || dir != self.state.dir;
 
         if dir_changed {
             // 翻转 cancel-flag(取消旧任务)。
@@ -364,7 +374,7 @@ impl PathPicker {
             return;
         }
         let new_query = complete_path(&self.state.dir, &entry.name, entry.is_dir, self.separator);
-        self.set_query(&new_query, window, cx);
+        self.navigate_to(new_query, window, cx);
     }
 
     /// Enter / 确认按钮:始终确认输入框中的路径，不隐式替换成列表选中项。
@@ -377,7 +387,41 @@ impl PathPicker {
     /// 返回当前浏览目录的上一级。
     fn go_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let parent = parent_directory(&self.state.dir, self.separator);
-        self.set_query(&parent, window, cx);
+        self.navigate_to(parent, window, cx);
+    }
+
+    fn navigate_to(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.state.dir.clone();
+        if !current.is_empty() && current != target {
+            self.back_history.push(current);
+            self.forward_history.clear();
+        }
+        self.set_query(&target, window, cx);
+    }
+
+    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.back_history.pop() else {
+            return;
+        };
+        if !self.state.dir.is_empty() {
+            self.forward_history.push(self.state.dir.clone());
+        }
+        self.set_query(&target, window, cx);
+    }
+
+    fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.forward_history.pop() else {
+            return;
+        };
+        if !self.state.dir.is_empty() {
+            self.back_history.push(self.state.dir.clone());
+        }
+        self.set_query(&target, window, cx);
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let query = self.state.query.clone();
+        self.update_matches_inner(query, true, cx);
     }
 
     /// Esc / 遮罩点击:关闭。
@@ -480,16 +524,42 @@ impl Focusable for PathPicker {
 impl Render for PathPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input_el: AnyElement = Input::new(&self.input).into_any_element();
+        let can_go_back = !self.back_history.is_empty();
+        let can_go_forward = !self.forward_history.is_empty();
+        let can_go_parent = parent_directory(&self.state.dir, self.separator) != self.state.dir;
         let path_row = div()
             .flex()
             .flex_row()
             .items_center()
             .gap(theme::space_sm())
-            .child(button("picker-parent", "上一级").on_click(cx.listener(
-                |this, _ev: &ClickEvent, window, cx| {
-                    this.go_parent(window, cx);
-                },
-            )))
+            .child(
+                icon_button("picker-back", "icons/arrow-left.svg", "后退")
+                    .disabled(!can_go_back)
+                    .on_click(cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                        this.go_back(window, cx);
+                    })),
+            )
+            .child(
+                icon_button("picker-forward", "icons/arrow-right.svg", "前进")
+                    .disabled(!can_go_forward)
+                    .on_click(cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                        this.go_forward(window, cx);
+                    })),
+            )
+            .child(
+                icon_button("picker-parent", "icons/arrow-up.svg", "上一级")
+                    .disabled(!can_go_parent)
+                    .on_click(cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                        this.go_parent(window, cx);
+                    })),
+            )
+            .child(
+                icon_button("picker-refresh", "icons/refresh-cw.svg", "刷新").on_click(
+                    cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                        this.refresh(cx);
+                    }),
+                ),
+            )
             .child(div().flex_1().min_w_0().child(input_el));
         let list = self.render_list(cx);
 
