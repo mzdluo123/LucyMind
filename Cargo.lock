@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "lucy-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "lucy-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "lucy-terminal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
