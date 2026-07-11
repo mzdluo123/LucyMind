@@ -127,6 +127,7 @@ impl IntoElement for IconButton {
             })
             .child(
                 gpui::svg()
+                    .flex_none()
                     .size(px(16.0))
                     .path(self.icon)
                     .text_color(rgb(if disabled {
@@ -192,7 +193,13 @@ impl IntoElement for Button {
 
         if let Some(icon) = self.icon {
             // 单色 SVG 必须设 text_color 才显形,跟按钮文字色染色。
-            btn = btn.child(gpui::svg().size(px(16.0)).path(icon).text_color(rgb(text)));
+            btn = btn.child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(16.0))
+                    .path(icon)
+                    .text_color(rgb(text)),
+            );
         }
 
         btn = btn.child(self.label);

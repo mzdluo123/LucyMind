@@ -80,6 +80,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .child(
                 gpui::svg()
+                    .flex_none()
                     .size(px(14.0))
                     .path("icons/plus.svg")
                     .text_color(rgb(theme::TEXT_FAINT)),
@@ -104,6 +105,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .child(
                 gpui::svg()
+                    .flex_none()
                     .size(px(14.0))
                     .path("icons/folder-open.svg")
                     .text_color(rgb(theme::TEXT_FAINT)),

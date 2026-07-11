@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{point, px, size, TestAppContext};
 
 use common::{
     build_workspace, shutdown_workspace, temp_repo_with_agent, wait_for, wait_for_shell_ready,
@@ -69,4 +69,27 @@ async fn pty_output_appears_in_snapshot(cx: &mut TestAppContext) {
     );
 
     shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn opened_terminal_tolerates_zero_size_paint(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let (workspace, window) = build_workspace(cx, Some(repo.clone()));
+    window.run_until_parked();
+
+    window.update(|_, cx| {
+        workspace.update(cx, |v, cx| v.open_worktree_for_test(repo.clone(), cx));
+    });
+    window.run_until_parked();
+
+    window.draw(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)), |_, _| {
+        workspace.clone()
+    });
+
+    window.update(|_, cx| {
+        workspace.update(cx, |view, cx| {
+            view.shutdown_all_terminals_for_test(cx);
+        });
+    });
+    window.run_until_parked();
 }
