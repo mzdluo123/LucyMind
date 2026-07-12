@@ -32,6 +32,8 @@ const ARROW_LEFT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-left.svg");
 const ARROW_RIGHT_SVG: &[u8] = include_bytes!("../assets/icons/arrow-right.svg");
 const ARROW_UP_SVG: &[u8] = include_bytes!("../assets/icons/arrow-up.svg");
 const REFRESH_CW_SVG: &[u8] = include_bytes!("../assets/icons/refresh-cw.svg");
+const ELLIPSIS_SVG: &[u8] = include_bytes!("../assets/icons/ellipsis.svg");
+const PENCIL_SVG: &[u8] = include_bytes!("../assets/icons/pencil.svg");
 
 /// app 的静态资源源。
 pub struct Assets;
@@ -61,6 +63,8 @@ impl AssetSource for Assets {
             "icons/arrow-right.svg" => Some(ARROW_RIGHT_SVG),
             "icons/arrow-up.svg" => Some(ARROW_UP_SVG),
             "icons/refresh-cw.svg" => Some(REFRESH_CW_SVG),
+            "icons/ellipsis.svg" => Some(ELLIPSIS_SVG),
+            "icons/pencil.svg" => Some(PENCIL_SVG),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -90,6 +94,8 @@ impl AssetSource for Assets {
             SharedString::from("icons/arrow-right.svg"),
             SharedString::from("icons/arrow-up.svg"),
             SharedString::from("icons/refresh-cw.svg"),
+            SharedString::from("icons/ellipsis.svg"),
+            SharedString::from("icons/pencil.svg"),
         ])
     }
 }

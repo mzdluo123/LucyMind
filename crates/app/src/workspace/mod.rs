@@ -211,6 +211,8 @@ pub struct WorkspaceView {
     launcher_menu_open: bool,
     /// 主仓行 `+` 的新建 worktree 启动方式菜单是否打开。
     new_worktree_menu_open: bool,
+    /// 当前打开行操作菜单的 worktree 路径。
+    worktree_action_menu: Option<PathBuf>,
     /// 路径输入选择器(Some = 打开中)。Zed 风格:文本输入 + 实时目录补全。
     /// 替代旧的 open_repo_choice_dialog + wsl_browser_dialog,统一本地/WSL 入口。
     path_picker: Option<gpui::Entity<crate::ui::PathPicker>>,
@@ -296,6 +298,7 @@ impl WorkspaceView {
             settings: None,
             launcher_menu_open: false,
             new_worktree_menu_open: false,
+            worktree_action_menu: None,
             path_picker: None,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
@@ -1264,6 +1267,30 @@ impl WorkspaceView {
         self.new_worktree_menu_open = open;
     }
 
+    /// 当前行操作菜单路径。
+    #[cfg(feature = "test-support")]
+    pub fn worktree_action_menu_for_test(&self) -> Option<&std::path::Path> {
+        self.worktree_action_menu.as_deref()
+    }
+
+    /// 是否正在编辑指定分支的别名。
+    #[cfg(feature = "test-support")]
+    pub fn editing_alias_for_test(&self) -> Option<&str> {
+        self.editing_alias.as_deref()
+    }
+
+    /// 是否已有待确认关闭的 worktree。
+    #[cfg(feature = "test-support")]
+    pub fn has_pending_close_for_test(&self) -> bool {
+        self.pending_close.is_some()
+    }
+
+    /// 设置侧边栏宽度，用于覆盖最小宽度布局。
+    #[cfg(feature = "test-support")]
+    pub fn set_sidebar_width_for_test(&mut self, width: f32) {
+        self.sidebar_width = width;
+    }
+
     /// 读取指定 worktree 在 session registry 中记录的初始 agent。
     #[cfg(feature = "test-support")]
     pub fn session_agent_for_test(&self, path: &std::path::Path) -> Option<String> {
@@ -1435,6 +1462,10 @@ impl Render for WorkspaceView {
                         this.new_worktree_menu_open = false;
                         cx.notify();
                     }
+                    if this.worktree_action_menu.is_some() {
+                        this.worktree_action_menu = None;
+                        cx.notify();
+                    }
                 }),
             )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
@@ -1445,6 +1476,11 @@ impl Render for WorkspaceView {
                 }
                 if this.new_worktree_menu_open && ev.keystroke.key == "escape" {
                     this.new_worktree_menu_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                if this.worktree_action_menu.is_some() && ev.keystroke.key == "escape" {
+                    this.worktree_action_menu = None;
                     cx.notify();
                     cx.stop_propagation();
                 }

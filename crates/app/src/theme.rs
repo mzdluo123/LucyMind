@@ -49,6 +49,9 @@ pub const TEXT_DIM: u32 = 0x8a_8a_92;
 /// 最弱文字(占位、辅助)。
 pub const TEXT_FAINT: u32 = 0x5c5c64;
 
+/// 次要图标。比 TEXT_FAINT 更亮，确保 14–16px 工具图标在暗色表面达到 3:1。
+pub const ICON_MUTED: u32 = 0x76_76_7f;
+
 /// 冷白高亮(极克制地用于当前项 / 强调文字)。
 pub const TEXT_BRIGHT: u32 = 0xe8_e8_ee;
 

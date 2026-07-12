@@ -1,335 +1,488 @@
-//! 侧边栏面板:标题区 + 仓库行 + Agents 动作区 + WORKTREES 列表。
-//!
-//! 作为 [`WorkspaceView`](super::WorkspaceView) 的 `impl` 方法(跨文件 impl),
-//! 直接访问其状态。样式 token 走 [`crate::theme`]。
+//! 侧边栏面板:固定的品牌/仓库上下文 + 可滚动的 worktree 列表。
+
+use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, IntoElement, ParentElement, SharedString, Stateful, Styled,
+    div, prelude::*, px, rgb, Context, IntoElement, KeyDownEvent, ParentElement, SharedString,
+    Stateful, Styled, Window,
 };
+use gpui_component::tooltip::Tooltip;
 
 use crate::theme;
 
 use super::{NewWorktreeLaunch, WorkspaceView};
 
+const SIDEBAR_ACTION_SIZE: f32 = 28.0;
+const WORKTREE_ROW_HEIGHT: f32 = 36.0;
+
+type SidebarAction =
+    Rc<dyn Fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static>;
+
 impl WorkspaceView {
     pub(super) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col();
+        let repo_label = self
+            .repo
+            .as_ref()
+            .and_then(|repo| repo.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "No repository".into());
+        let repo_tooltip = self
+            .repo
+            .as_ref()
+            .map(|repo| repo.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Open a Git repository".into());
 
-        // 标题区 —— logo + 大字标题(约 3× 正文),冷白,几何字体。底部描边线把
-        // 标题区与内容区清楚分隔(设计语言:分隔靠线 + 间距)。
-        list = list.child(
-            div()
-                .pb(theme::space_md())
-                .mb(theme::space_md())
-                .border_b_1()
-                .border_color(rgb(theme::BORDER))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(theme::space_sm())
-                // GPUI 的 svg() 是单色 mask,必须设 text_color 才显形(且多色 SVG
-                // 会被填成单色剪影)。冷白填充。
-                .child(
-                    gpui::svg()
-                        .flex_none()
-                        .size(gpui::px(42.0)) // 1.5× 标题字号
-                        .path("icons/logo.svg")
-                        .text_color(rgb(theme::TEXT_BRIGHT)),
-                )
-                .child(
-                    div()
-                        .text_size(gpui::px(28.0)) // ≈ 3× 正文(正文 ~14)
-                        .text_color(rgb(theme::TEXT_BRIGHT))
-                        .child(SharedString::from("LUCYMIND")),
-                ),
-        );
+        let brand = div()
+            .pb(theme::space_md())
+            .mb(theme::space_md())
+            .border_b_1()
+            .border_color(rgb(theme::BORDER))
+            .flex()
+            .items_center()
+            .gap(theme::space_sm())
+            .child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(24.0))
+                    .path("icons/logo.svg")
+                    .text_color(rgb(theme::TEXT_BRIGHT)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(17.0))
+                    .text_color(rgb(theme::TEXT_BRIGHT))
+                    .child("LUCYMIND"),
+            );
 
-        // 仓库行:当前仓库名 + folder-open 图标按钮(切换/打开仓库)。
-        let repo_label = match &self.repo {
-            Some(r) => r
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "repo".into()),
-            None => "no repository".into(),
-        };
-        list = list.child(
-            div()
-                .mb(theme::space_md())
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(theme::space_sm())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(rgb(theme::TEXT_DIM))
-                        .child(SharedString::from(repo_label)),
-                )
-                .child(
-                    // folder-open 图标按钮:与齿轮同风格(无背景无描边 +
-                    // group-hover 染色)。比文字按钮更紧凑、更编辑器风。
-                    div()
-                        .id("open-repo")
-                        .group("open-repo-btn")
-                        .flex_none()
-                        .px(theme::space_xs())
-                        .cursor_pointer()
-                        .child(
-                            gpui::svg()
-                                .flex_none()
-                                .size(gpui::px(14.0))
-                                .path("icons/folder-open.svg")
-                                .text_color(rgb(theme::TEXT_FAINT))
-                                .group_hover("open-repo-btn", |s| s.text_color(rgb(theme::TEXT))),
-                        )
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.open_repo_picker(window, cx);
-                        })),
-                ),
-        );
+        let repo_name_tooltip = SharedString::from(repo_tooltip);
+        let repo_row = div()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(theme::space_sm())
+            .child(
+                div()
+                    .id("repository-name")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(rgb(theme::TEXT))
+                    .child(SharedString::from(repo_label))
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(repo_name_tooltip.clone()).build(window, cx)
+                    }),
+            )
+            .child(self.sidebar_icon_button(
+                "open-repo",
+                "icons/folder-open.svg",
+                "Open repository",
+                cx,
+                |this, window, cx| this.open_repo_picker(window, cx),
+            ));
 
-        // 分隔:worktree 段(用描边分隔线,不用颜色)。标题行右侧放齿轮按钮 ——
-        // 图形化编辑 .worktree.toml(别名之外的设置)。
-        list = list.child(
-            div()
-                .mt(theme::space_md())
-                .mb(theme::space_sm())
-                .border_b_1()
-                .border_color(rgb(theme::BORDER_SUBTLE))
-                .pb(theme::space_xs())
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_color(rgb(theme::TEXT_DIM))
-                        .child(SharedString::from("WORKTREES")),
-                )
-                .child(
-                    // 齿轮:GPUI 的 svg() 是单色 mask,**必须**显式设 text_color
-                    // 才显形(不继承父 div 的 color),所以直接设在 svg 上。用
-                    // group-hover 让悬停整个按钮时齿轮变亮 —— 与 ✎/✕(纯文字、
-                    // 天然跟随父色)观感一致。
-                    div()
-                        .id("open-settings")
-                        .group("settings-btn")
-                        .flex_none()
-                        .px(theme::space_xs())
-                        .cursor_pointer()
-                        .child(
-                            gpui::svg()
-                                .flex_none()
-                                .size(gpui::px(14.0))
-                                .path("icons/settings.svg")
-                                .text_color(rgb(theme::TEXT_FAINT))
-                                .group_hover("settings-btn", |s| s.text_color(rgb(theme::TEXT))),
-                        )
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.open_settings(window, cx);
-                        })),
-                ),
+        let new_worktree_button = self.sidebar_icon_button(
+            "new-worktree-trigger",
+            "icons/plus.svg",
+            "New worktree",
+            cx,
+            |this, _window, cx| {
+                this.launcher_menu_open = false;
+                this.worktree_action_menu = None;
+                this.new_worktree_menu_open = !this.new_worktree_menu_open;
+                cx.notify();
+            },
         );
-        for (i, wt) in self.worktrees.iter().enumerate() {
-            list = list.child(self.worktree_row(i, wt, cx));
+        let mut new_worktree_anchor = div().relative().flex_none().child(new_worktree_button);
+        if self.new_worktree_menu_open {
+            new_worktree_anchor =
+                new_worktree_anchor.child(gpui::deferred(self.new_worktree_menu(cx)));
         }
 
-        // (状态提示移到主区底部的状态栏,见 render —— 更像编辑器,不占侧边栏。)
+        let worktree_header = div()
+            .mt(theme::space_md())
+            .border_b_1()
+            .border_color(rgb(theme::BORDER_SUBTLE))
+            .pb(theme::space_xs())
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .child("WORKTREES"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme::space_xs())
+                    .child(new_worktree_anchor)
+                    .child(self.sidebar_icon_button(
+                        "open-settings",
+                        "icons/settings.svg",
+                        "Worktree settings",
+                        cx,
+                        |this, window, cx| this.open_settings(window, cx),
+                    )),
+            );
 
-        // 侧边栏:宽度可拖(sidebar_width),内容可垂直滚动(worktree 多不溢出)。
-        // 右侧描边 = 视觉边界。整块用界面字体 Futura。
+        let fixed_header = div()
+            .flex_none()
+            .px(theme::space_lg())
+            .pt(theme::space_lg())
+            .child(brand)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .child("REPOSITORY"),
+            )
+            .child(repo_row)
+            .child(worktree_header);
+
+        let mut worktree_list = div().flex().flex_col().pt(theme::space_xs());
+        for (i, worktree) in self.worktrees.iter().enumerate() {
+            worktree_list = worktree_list.child(self.worktree_row(i, worktree, cx));
+        }
+
         div()
             .flex_none()
-            .w(gpui::px(self.sidebar_width))
+            .w(px(self.sidebar_width))
             .h_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
             .bg(rgb(theme::SURFACE))
             .border_r_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
             .font_family(theme::FONT_UI)
+            .child(fixed_header)
             .child(
-                // 可滚动内容区(id 是 overflow_y_scroll 的前提)。
                 div()
                     .id("sidebar-scroll")
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .p(theme::space_lg())
-                    .child(list),
+                    .px(theme::space_lg())
+                    .pb(theme::space_lg())
+                    .child(worktree_list),
             )
     }
 
-    /// 单条 worktree 行:标记条 + 图标 + 名字 + ✎ 改别名 + ✕ 关闭。
+    fn sidebar_icon_button(
+        &self,
+        id: impl Into<SharedString>,
+        icon: &'static str,
+        tooltip: &'static str,
+        cx: &mut Context<Self>,
+        on_activate: impl Fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
+    ) -> Stateful<gpui::Div> {
+        let id = id.into();
+        let debug_id = id.clone();
+        let action: SidebarAction = Rc::new(on_activate);
+        let click_action = action.clone();
+
+        div()
+            .id(id)
+            .debug_selector(move || debug_id.to_string())
+            .flex_none()
+            .size(px(SIDEBAR_ACTION_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme::radius())
+            .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(15.0))
+                    .path(icon)
+                    .text_color(rgb(theme::ICON_MUTED)),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                cx.stop_propagation();
+                click_action(this, window, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    action(this, window, cx);
+                }
+            }))
+    }
+
     fn worktree_row(
         &self,
-        i: usize,
-        wt: &lucy_core::git::WorktreeEntry,
+        index: usize,
+        worktree: &lucy_core::git::WorktreeEntry,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let branch = wt.branch.clone().unwrap_or_else(|| "detached".to_string());
-        // 显示名:有别名用别名,否则用分支名。别名存 .worktree.toml 的 [alias]。
+        let branch = worktree
+            .branch
+            .clone()
+            .unwrap_or_else(|| "detached".to_string());
         let alias = self.config.alias.get(&branch).cloned();
         let label = alias.clone().unwrap_or_else(|| branch.clone());
-        let ours = self.is_ours(&wt.path);
-        // render 路径直接用 PathBuf 比较(不调 canon/same_path):
-        // set_repo/refresh_worktrees 已预规范化 worktrees 的 path,
-        // self.repo / self.active 也已是规范化路径。
-        // 若改回调 canon,WslHost 下每帧 spawn wsl.exe → UI 卡死。
-        let is_main = self.repo.as_deref().is_some_and(|r| wt.path == r);
-        let is_active = self.active.as_deref().is_some_and(|a| a == wt.path);
-        let wt_path_for_click = wt.path.clone();
+        let ours = self.is_ours(&worktree.path);
+        let is_main = self
+            .repo
+            .as_deref()
+            .is_some_and(|repo| worktree.path == repo);
+        let is_active = self
+            .active
+            .as_deref()
+            .is_some_and(|active| active == worktree.path);
+        let worktree_path = worktree.path.clone();
+        let path_for_keyboard = worktree_path.clone();
+        let row_tooltip = SharedString::from(match &alias {
+            Some(alias) => format!("{alias}\n{branch}"),
+            None => branch.clone(),
+        });
 
-        // 除主仓外都可点(切换/打开)、可关。
-        // 所有行(含主仓)都可点开/切换;只有非主仓可关闭(主仓不是 worktree)。
-        let can_close = !is_main;
-
-        let mut row = div()
-            .id(SharedString::from(format!("wt-{i}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(theme::space_sm())
-            // 左侧标记条:active 冷白,否则与表面同色(视觉上"无")。
-            .border_l_2()
-            .border_color(if is_active {
-                rgb(theme::TEXT_BRIGHT)
-            } else {
-                rgb(theme::SURFACE)
-            })
-            .pl(theme::space_sm())
-            .pr(theme::space_xs())
-            .py(theme::space_xs())
-            .text_color(rgb(if is_main {
-                theme::TEXT_DIM
-            } else {
-                theme::TEXT
-            }));
-
-        if is_active {
-            row = row.bg(rgb(theme::SURFACE_RAISED));
-        }
-        // 整行可点(含主仓)→ 打开/切换到该目录的终端。
-        row = row
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
-        row = row.on_click(cx.listener(move |this, _ev, _w, cx| {
-            this.open_worktree(wt_path_for_click.clone(), cx);
-        }));
-
-        // 图标(Lucide git 图标,单色跟主题):main=folder-git,其余=git-branch。
         let icon_path = if is_main {
             "icons/folder-git-2.svg"
         } else {
             "icons/git-branch.svg"
         };
-        row = row.child(
-            gpui::svg()
-                .flex_none()
-                .size(gpui::px(14.0))
-                .path(icon_path)
-                .text_color(rgb(if is_main {
-                    theme::TEXT_DIM
-                } else if ours {
-                    theme::TEXT
+        let icon_color = if is_active {
+            theme::TEXT_BRIGHT
+        } else if is_main || ours {
+            theme::TEXT_DIM
+        } else {
+            theme::ICON_MUTED
+        };
+
+        let mut label_column = div()
+            .id(SharedString::from(format!("worktree-label-{index}")))
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(rgb(if is_active {
+                theme::TEXT_BRIGHT
+            } else if is_main {
+                theme::TEXT_DIM
+            } else {
+                theme::TEXT
+            }))
+            .child(SharedString::from(label))
+            .tooltip(move |window, cx| Tooltip::new(row_tooltip.clone()).build(window, cx));
+        if alias.is_some() {
+            label_column = label_column.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(SharedString::from(branch.clone())),
+            );
+        }
+
+        let menu_path = worktree.path.clone();
+        let trigger_path = menu_path.clone();
+        let menu_button = self.sidebar_icon_button(
+            SharedString::from(format!("worktree-actions-{index}")),
+            "icons/ellipsis.svg",
+            "Worktree actions",
+            cx,
+            move |this, _window, cx| {
+                this.new_worktree_menu_open = false;
+                if this.worktree_action_menu.as_ref() == Some(&trigger_path) {
+                    this.worktree_action_menu = None;
                 } else {
-                    theme::TEXT_FAINT
-                })),
+                    this.worktree_action_menu = Some(trigger_path.clone());
+                }
+                cx.notify();
+            },
         );
-        row = row.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(SharedString::from(label.clone())),
-        );
-
-        // ✎ 改别名:所有行(含主仓)都可设别名,固定行尾右对齐。
-        {
-            let edit_branch = branch.clone();
-            let edit_init = alias.clone().unwrap_or_default();
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("alias-{i}")))
-                    .flex_none()
-                    .px(theme::space_xs())
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(theme::TEXT)))
-                    .child(SharedString::from("✎"))
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        cx.stop_propagation();
-                        this.open_alias_editor(&edit_branch, &edit_init, window, cx);
-                    })),
-            );
+        let mut menu_anchor = div().relative().flex_none().child(menu_button);
+        if self.worktree_action_menu.as_ref() == Some(&menu_path) {
+            menu_anchor = menu_anchor.child(gpui::deferred(self.worktree_action_menu(
+                index,
+                branch.clone(),
+                alias.unwrap_or_default(),
+                worktree.path.clone(),
+                !is_main,
+                cx,
+            )));
         }
 
-        // `+` 新建 worktree:仅主仓行显示(在此仓库上开 worktree)。
-        // 与 ✎ / ✕ 同风格:文字按钮、group-hover 染色、stop_propagation 防误触行点击。
-        if is_main {
-            let trigger = div()
-                .id(SharedString::from(format!("new-wt-{i}")))
-                .group("new-wt-btn")
-                .flex_none()
-                .px(theme::space_xs())
-                .cursor_pointer()
-                .text_color(rgb(theme::TEXT_FAINT))
-                .child(
-                    gpui::svg()
-                        .flex_none()
-                        .size(gpui::px(14.0))
-                        .path("icons/plus.svg")
-                        .text_color(rgb(theme::TEXT_FAINT))
-                        .group_hover("new-wt-btn", |s| s.text_color(rgb(theme::TEXT))),
-                )
-                .on_click(cx.listener(|this, _ev, _w, cx| {
-                    cx.stop_propagation();
-                    this.launcher_menu_open = false;
-                    this.new_worktree_menu_open = !this.new_worktree_menu_open;
-                    cx.notify();
-                }));
-            let mut launcher = div().relative().flex_none().child(trigger);
-            if self.new_worktree_menu_open {
-                launcher = launcher.child(gpui::deferred(self.new_worktree_menu(cx)));
+        let mut row = div()
+            .id(SharedString::from(format!("wt-{index}")))
+            .debug_selector(move || format!("wt-{index}"))
+            .h(px(WORKTREE_ROW_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(theme::space_sm())
+            .border_l_2()
+            .border_color(rgb(if is_active {
+                theme::TEXT_BRIGHT
+            } else {
+                theme::SURFACE
+            }))
+            .pl(theme::space_sm())
+            .pr(theme::space_xs())
+            .rounded(theme::radius())
+            .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_color(rgb(theme::TEXT_BRIGHT))
+            })
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(14.0))
+                    .path(icon_path)
+                    .text_color(rgb(icon_color)),
+            )
+            .child(label_column)
+            .child(menu_anchor);
+        if is_active {
+            row = row.bg(rgb(theme::SURFACE_RAISED));
+        }
+        row.on_click(cx.listener(move |this, _event, _window, cx| {
+            this.open_worktree(worktree_path.clone(), cx);
+        }))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+            if is_activate_key(event) {
+                cx.stop_propagation();
+                this.open_worktree(path_for_keyboard.clone(), cx);
             }
-            row = row.child(launcher);
-        }
-
-        // ✕ 关闭:仅非主仓(主仓不是 worktree,不可关)。
-        if can_close {
-            let close_path = wt.path.clone();
-            let close_branch = branch.clone();
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("close-{i}")))
-                    .flex_none()
-                    .px(theme::space_xs())
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(theme::STATE_ERROR)))
-                    .child(SharedString::from("✕"))
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        // 阻止冒泡到整行的 open_worktree —— 否则点 ✕ 会同时触发
-                        // 关闭 + 打开,行为打架。
-                        cx.stop_propagation();
-                        this.request_close(close_path.clone(), close_branch.clone(), cx);
-                    })),
-            );
-        }
-
-        row
+        }))
     }
 
-    /// 主仓 `+` 的启动方式菜单。选择后才创建 worktree，首个会话即为所选项。
-    fn new_worktree_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut card = div()
+    fn worktree_action_menu(
+        &self,
+        index: usize,
+        branch: String,
+        alias: String,
+        path: std::path::PathBuf,
+        can_close: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rename_branch = branch.clone();
+        let rename_alias = alias.clone();
+        let mut menu = div()
             .absolute()
-            .top(px(24.0))
+            .top(px(SIDEBAR_ACTION_SIZE + 2.0))
+            .right_0()
+            .min_w(px(164.0))
+            .bg(rgb(theme::SURFACE))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .rounded(theme::radius())
+            .occlude()
+            .py(theme::space_xs())
+            .flex()
+            .flex_col()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
+            )
+            .child(self.worktree_action_menu_item(
+                format!("worktree-rename-{index}"),
+                "icons/pencil.svg",
+                "Rename",
+                false,
+                cx,
+                move |this, window, cx| {
+                    this.worktree_action_menu = None;
+                    this.open_alias_editor(&rename_branch, &rename_alias, window, cx);
+                },
+            ));
+
+        if can_close {
+            menu = menu.child(self.worktree_action_menu_item(
+                format!("worktree-close-{index}"),
+                "icons/circle-x.svg",
+                "Close worktree",
+                true,
+                cx,
+                move |this, _window, cx| {
+                    this.worktree_action_menu = None;
+                    this.request_close(path.clone(), branch.clone(), cx);
+                },
+            ));
+        }
+        menu
+    }
+
+    fn worktree_action_menu_item(
+        &self,
+        id: String,
+        icon: &'static str,
+        label: &'static str,
+        destructive: bool,
+        cx: &mut Context<Self>,
+        on_activate: impl Fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
+    ) -> impl IntoElement {
+        let action: SidebarAction = Rc::new(on_activate);
+        let click_action = action.clone();
+        let debug_id = id.clone();
+        let color = if destructive {
+            theme::STATE_ERROR
+        } else {
+            theme::TEXT
+        };
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || debug_id)
+            .h(px(32.0))
+            .px(theme::space_sm())
+            .flex()
+            .items_center()
+            .gap(theme::space_sm())
+            .text_color(rgb(color))
+            .cursor_pointer()
+            .focusable()
+            .focus(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(14.0))
+                    .path(icon)
+                    .text_color(rgb(color)),
+            )
+            .child(label)
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                cx.stop_propagation();
+                click_action(this, window, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    action(this, window, cx);
+                }
+            }))
+    }
+
+    fn new_worktree_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut menu = div()
+            .absolute()
+            .top(px(SIDEBAR_ACTION_SIZE + 2.0))
             .right_0()
             .min_w(px(180.0))
             .bg(rgb(theme::SURFACE))
@@ -342,15 +495,17 @@ impl WorkspaceView {
             .flex_col()
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|_this, _ev, _w, cx| cx.stop_propagation()),
+                cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
             )
             .child(
                 div()
+                    .h(px(28.0))
                     .px(theme::space_sm())
-                    .py(theme::space_xs())
+                    .flex()
+                    .items_center()
                     .text_xs()
                     .text_color(rgb(theme::TEXT_DIM))
-                    .child(SharedString::from("Start with")),
+                    .child("START WITH"),
             )
             .child(
                 self.new_worktree_menu_item("Terminal", None, cx, |this, cx| {
@@ -362,7 +517,7 @@ impl WorkspaceView {
         for agent in lucy_core::agent::builtin_agents() {
             let name = agent.name.to_string();
             let icon = crate::assets::agent_icon(agent.name).map(SharedString::from);
-            card = card.child(self.new_worktree_menu_item(
+            menu = menu.child(self.new_worktree_menu_item(
                 agent.display,
                 icon,
                 cx,
@@ -372,7 +527,7 @@ impl WorkspaceView {
                 },
             ));
         }
-        card
+        menu
     }
 
     fn new_worktree_menu_item(
@@ -380,24 +535,23 @@ impl WorkspaceView {
         label: &str,
         icon: Option<SharedString>,
         cx: &mut Context<Self>,
-        on_click: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
+        on_activate: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
     ) -> Stateful<gpui::Div> {
+        let label = label.to_string();
+        let action = Rc::new(on_activate);
+        let click_action = action.clone();
         let mut item = div()
             .id(SharedString::from(format!("new-worktree-{label}")))
+            .h(px(32.0))
             .px(theme::space_md())
-            .py(theme::space_xs())
             .flex()
-            .flex_row()
             .items_center()
-            .gap(theme::space_xs())
+            .gap(theme::space_sm())
             .cursor_pointer()
             .text_color(rgb(theme::TEXT))
-            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                on_click(this, cx);
-                cx.notify();
-            }));
+            .focusable()
+            .focus(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)));
         if let Some(path) = icon {
             item = item.child(
                 gpui::svg()
@@ -407,6 +561,22 @@ impl WorkspaceView {
                     .text_color(rgb(theme::TEXT)),
             );
         }
-        item.child(SharedString::from(label.to_string()))
+        item.child(label)
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                cx.stop_propagation();
+                click_action(this, cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    action(this, cx);
+                    cx.notify();
+                }
+            }))
     }
+}
+
+fn is_activate_key(event: &KeyDownEvent) -> bool {
+    matches!(event.keystroke.key.as_str(), "enter" | "space")
 }
