@@ -96,6 +96,7 @@ pub fn build_workspace_with_host(
     });
     let (_root, window) = cx.add_window_view(|window, cx| {
         gpui_component::init(cx);
+        lucy_app::theme::configure_component_theme(cx);
         gpui_component::Root::new(workspace.clone(), window, cx)
     });
     std::mem::forget(registry_dir);
