@@ -18,6 +18,7 @@ const FOLDER_GIT_SVG: &[u8] = include_bytes!("../assets/icons/folder-git-2.svg")
 const GIT_BRANCH_SVG: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
 const SETTINGS_SVG: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const PLUS_SVG: &[u8] = include_bytes!("../assets/icons/plus.svg");
+const TERMINAL_SVG: &[u8] = include_bytes!("../assets/icons/terminal.svg");
 const FOLDER_OPEN_SVG: &[u8] = include_bytes!("../assets/icons/folder-open.svg");
 const GIT_PULL_REQUEST_SVG: &[u8] = include_bytes!("../assets/icons/git-pull-request.svg");
 const CIRCLE_CHECK_SVG: &[u8] = include_bytes!("../assets/icons/circle-check-big.svg");
@@ -46,6 +47,7 @@ impl AssetSource for Assets {
             "icons/git-branch.svg" => Some(GIT_BRANCH_SVG),
             "icons/settings.svg" => Some(SETTINGS_SVG),
             "icons/plus.svg" => Some(PLUS_SVG),
+            "icons/terminal.svg" => Some(TERMINAL_SVG),
             "icons/folder-open.svg" => Some(FOLDER_OPEN_SVG),
             "icons/git-pull-request.svg" => Some(GIT_PULL_REQUEST_SVG),
             "icons/circle-check-big.svg" => Some(CIRCLE_CHECK_SVG),
@@ -74,6 +76,7 @@ impl AssetSource for Assets {
             SharedString::from("icons/git-branch.svg"),
             SharedString::from("icons/settings.svg"),
             SharedString::from("icons/plus.svg"),
+            SharedString::from("icons/terminal.svg"),
             SharedString::from("icons/folder-open.svg"),
             SharedString::from("icons/git-pull-request.svg"),
             SharedString::from("icons/circle-check-big.svg"),
