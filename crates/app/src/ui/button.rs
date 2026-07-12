@@ -123,7 +123,14 @@ impl IntoElement for IconButton {
             }))
             .when(!disabled, |this| {
                 this.cursor_pointer()
+                    .tab_index(0)
+                    .focus(|style| {
+                        style
+                            .bg(rgb(theme::BTN_BG_ACTIVE))
+                            .border_color(rgb(theme::TEXT_DIM))
+                    })
                     .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+                    .active(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
             })
             .child(
                 gpui::svg()
@@ -189,7 +196,14 @@ impl IntoElement for Button {
             .rounded(theme::radius())
             .text_color(rgb(text))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)));
+            .tab_index(0)
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
+            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)));
 
         if let Some(icon) = self.icon {
             // 单色 SVG 必须设 text_color 才显形,跟按钮文字色染色。

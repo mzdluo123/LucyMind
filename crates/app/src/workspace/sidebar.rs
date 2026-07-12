@@ -81,6 +81,7 @@ impl WorkspaceView {
                 "open-repo",
                 "icons/folder-open.svg",
                 "Open repository",
+                false,
                 cx,
                 |this, window, cx| this.open_repo_picker(window, cx),
             ));
@@ -88,7 +89,12 @@ impl WorkspaceView {
         let new_worktree_button = self.sidebar_icon_button(
             "new-worktree-trigger",
             "icons/plus.svg",
-            "New worktree",
+            if self.creating_worktree {
+                "Creating worktree"
+            } else {
+                "New worktree"
+            },
+            self.creating_worktree,
             cx,
             |this, _window, cx| {
                 this.launcher_menu_open = false;
@@ -127,6 +133,7 @@ impl WorkspaceView {
                         "open-settings",
                         "icons/settings.svg",
                         "Worktree settings",
+                        false,
                         cx,
                         |this, window, cx| this.open_settings(window, cx),
                     )),
@@ -181,6 +188,7 @@ impl WorkspaceView {
         id: impl Into<SharedString>,
         icon: &'static str,
         tooltip: &'static str,
+        disabled: bool,
         cx: &mut Context<Self>,
         on_activate: impl Fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
     ) -> Stateful<gpui::Div> {
@@ -189,7 +197,7 @@ impl WorkspaceView {
         let action: SidebarAction = Rc::new(on_activate);
         let click_action = action.clone();
 
-        div()
+        let mut button = div()
             .id(id)
             .debug_selector(move || debug_id.to_string())
             .flex_none()
@@ -198,15 +206,7 @@ impl WorkspaceView {
             .items_center()
             .justify_center()
             .rounded(theme::radius())
-            .cursor_pointer()
-            .focusable()
-            .focus(|style| {
-                style
-                    .bg(rgb(theme::BTN_BG_ACTIVE))
-                    .border_1()
-                    .border_color(rgb(theme::TEXT_DIM))
-            })
-            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .opacity(if disabled { 0.45 } else { 1.0 })
             .child(
                 gpui::svg()
                     .flex_none()
@@ -214,17 +214,30 @@ impl WorkspaceView {
                     .path(icon)
                     .text_color(rgb(theme::ICON_MUTED)),
             )
-            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                cx.stop_propagation();
-                click_action(this, window, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if is_activate_key(event) {
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx));
+        if !disabled {
+            button = button
+                .cursor_pointer()
+                .focusable()
+                .focus(|style| {
+                    style
+                        .bg(rgb(theme::BTN_BG_ACTIVE))
+                        .border_1()
+                        .border_color(rgb(theme::TEXT_DIM))
+                })
+                .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+                .on_click(cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
-                    action(this, window, cx);
-                }
-            }))
+                    click_action(this, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if is_activate_key(event) {
+                        cx.stop_propagation();
+                        action(this, window, cx);
+                    }
+                }));
+        }
+        button
     }
 
     fn worktree_row(
@@ -302,6 +315,7 @@ impl WorkspaceView {
             SharedString::from(format!("worktree-actions-{index}")),
             "icons/ellipsis.svg",
             "Worktree actions",
+            false,
             cx,
             move |this, _window, cx| {
                 this.new_worktree_menu_open = false;
