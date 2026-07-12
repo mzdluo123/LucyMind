@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{point, px, size, Bounds, Focusable, Pixels, TestAppContext};
 
 use common::{
     build_workspace, shutdown_workspace, temp_repo, temp_repo_with_agent, wait_for,
@@ -26,6 +26,43 @@ fn create_worktree(
         Duration::from_secs(15),
     );
     cx.update(|cx| workspace.update(cx, |v, _| v.active_path().map(|p| p.to_path_buf()).unwrap()))
+}
+
+fn draw_and_get(
+    window: &mut gpui::VisualTestContext,
+    workspace: &gpui::Entity<lucy_app::workspace::WorkspaceView>,
+    selector: &'static str,
+    width: f32,
+) -> Bounds<Pixels> {
+    window.simulate_resize(size(px(width), px(680.0)));
+    window.run_until_parked();
+    window.draw(
+        point(px(0.0), px(0.0)),
+        size(px(width), px(680.0)),
+        |_, _| workspace.clone(),
+    );
+    window
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} should be rendered"))
+}
+
+fn focus_active_terminal(
+    window: &mut gpui::VisualTestContext,
+    workspace: &gpui::Entity<lucy_app::workspace::WorkspaceView>,
+    path: &std::path::Path,
+) {
+    let terminal = window.update(|_window, cx| {
+        workspace
+            .read(cx)
+            .terminal_at(path)
+            .expect("active terminal")
+            .clone()
+    });
+    window.update(|window, cx| {
+        window.focus(&terminal.focus_handle(cx));
+        window.refresh();
+    });
+    window.run_until_parked();
 }
 
 #[gpui::test]
@@ -1386,4 +1423,134 @@ async fn tab_overflow_many_tabs(cx: &mut TestAppContext) {
     );
 
     shutdown_workspace(cx, &workspace);
+}
+
+// ---- 17. tab 栏可访问性与自动滚动 ----
+
+/// 终端持有键盘焦点时，tab 快捷键仍应在 Workspace 捕获阶段生效，不能写进 PTY。
+#[gpui::test]
+async fn tab_shortcuts_work_while_terminal_is_focused(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, window) = build_workspace(cx, Some(repo));
+    let wt_path = create_worktree(window, &workspace);
+
+    focus_active_terminal(window, &workspace, &wt_path);
+    window.simulate_keystrokes("secondary-t");
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        2,
+        "secondary-t should create a tab"
+    );
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(1),
+        "new tab should become active"
+    );
+
+    focus_active_terminal(window, &workspace, &wt_path);
+    window.simulate_keystrokes("secondary-shift-[");
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(0),
+        "secondary-shift-[ should select the previous tab"
+    );
+
+    focus_active_terminal(window, &workspace, &wt_path);
+    window.simulate_keystrokes("secondary-2");
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(1),
+        "secondary-2 should select the second tab"
+    );
+
+    focus_active_terminal(window, &workspace, &wt_path);
+    window.simulate_keystrokes("secondary-w");
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).tab_count(&wt_path)),
+        1,
+        "secondary-w should close the active tab"
+    );
+    assert_eq!(
+        window.read(|cx| workspace.read(cx).active_tab_index()),
+        Some(0)
+    );
+
+    shutdown_workspace(window, &workspace);
+}
+
+/// 大量 tab 下 active tab 会自动滚入可视区，且边缘滚动提示随方向出现。
+#[gpui::test]
+async fn active_tab_scrolls_into_view_and_shows_overflow_cues(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, window) = build_workspace(cx, Some(repo));
+    create_worktree(window, &workspace);
+    window.simulate_resize(size(px(760.0), px(680.0)));
+    window.run_until_parked();
+
+    for _ in 0..7 {
+        window.update(|_window, cx| {
+            workspace.update(cx, |view, cx| {
+                view.new_terminal_tab_for_test(ShellKind::Default, cx)
+            });
+        });
+    }
+
+    // 第一帧完成 ScrollHandle 布局，第二帧根据 offset 渲染边缘提示。
+    draw_and_get(window, &workspace, "tab-close-7", 760.0);
+    let list_bounds = window.debug_bounds("tab-list").expect("tab list bounds");
+    let first_bounds = window.debug_bounds("tab-0").expect("first tab bounds");
+    let last_bounds = window.debug_bounds("tab-7").expect("last tab bounds");
+    let (last_offset, max_offset) = window
+        .read(|cx| workspace.read(cx).tab_scroll_state_for_test())
+        .expect("active tab scroll state");
+    assert!(
+        max_offset > 0.0,
+        "tab list should overflow: list={list_bounds:?}, first={first_bounds:?}, last={last_bounds:?}, offset={last_offset}, max={max_offset}"
+    );
+    assert!(
+        last_offset < 0.0,
+        "new active tab should scroll toward the trailing edge"
+    );
+    draw_and_get(window, &workspace, "tab-scroll-left", 760.0);
+
+    window.update(|_window, cx| workspace.update(cx, |view, cx| view.switch_tab_for_test(0, cx)));
+    draw_and_get(window, &workspace, "tab-close-0", 760.0);
+    draw_and_get(window, &workspace, "tab-scroll-right", 760.0);
+    let (first_offset, _) = window
+        .read(|cx| workspace.read(cx).tab_scroll_state_for_test())
+        .expect("active tab scroll state");
+    assert!(
+        first_offset.abs() < 0.5,
+        "first tab should scroll back to the leading edge"
+    );
+
+    // Close 按钮始终预留固定命中区，inactive hover 显示时不会引发布局跳动。
+    let close = draw_and_get(window, &workspace, "tab-close-0", 760.0);
+    assert_eq!(f32::from(close.size.width), 24.0);
+    assert_eq!(f32::from(close.size.height), 24.0);
+
+    shutdown_workspace(window, &workspace);
+}
+
+/// launcher trigger 获得鼠标焦点后，Enter 与点击具有相同行为。
+#[gpui::test]
+async fn launcher_trigger_is_keyboard_activatable(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, window) = build_workspace(cx, Some(repo));
+    create_worktree(window, &workspace);
+
+    let trigger = draw_and_get(window, &workspace, "launcher-trigger", 900.0);
+    window.simulate_click(trigger.center(), gpui::Modifiers::none());
+    assert!(window.read(|cx| workspace.read(cx).launcher_menu_open_for_test()));
+
+    window.simulate_keystrokes("escape");
+    assert!(!window.read(|cx| workspace.read(cx).launcher_menu_open_for_test()));
+
+    window.simulate_keystrokes("enter");
+    assert!(
+        window.read(|cx| workspace.read(cx).launcher_menu_open_for_test()),
+        "focused launcher trigger should activate with Enter"
+    );
+
+    shutdown_workspace(window, &workspace);
 }

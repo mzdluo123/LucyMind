@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, rgb, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    ParentElement, Render, SharedString, Styled, Window,
+    ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
 };
 
 use lucy_core::agent::AgentSpec;
@@ -175,6 +175,8 @@ struct TerminalTab {
 struct TerminalGroup {
     tabs: Vec<TerminalTab>,
     active_tab: usize,
+    /// 每个 worktree 独立保存 tab 栏横向滚动位置。
+    tab_scroll: ScrollHandle,
 }
 
 pub struct WorkspaceView {
@@ -437,6 +439,7 @@ impl WorkspaceView {
                 TerminalGroup {
                     tabs: vec![tab],
                     active_tab: 0,
+                    tab_scroll: ScrollHandle::new(),
                 },
             );
         }
@@ -673,6 +676,7 @@ impl WorkspaceView {
             TerminalGroup {
                 tabs: vec![tab],
                 active_tab: 0,
+                tab_scroll: ScrollHandle::new(),
             },
         );
         self.active = Some(wt_key.clone());
@@ -868,6 +872,7 @@ impl WorkspaceView {
             if let Some(group) = self.terminals.get_mut(key) {
                 if index < group.tabs.len() {
                     group.active_tab = index;
+                    group.tab_scroll.scroll_to_item(index);
                     cx.notify();
                 }
             }
@@ -884,9 +889,11 @@ impl WorkspaceView {
         let group = self.terminals.entry(key).or_insert_with(|| TerminalGroup {
             tabs: Vec::new(),
             active_tab: 0,
+            tab_scroll: ScrollHandle::new(),
         });
         group.tabs.push(tab);
         group.active_tab = group.tabs.len() - 1;
+        group.tab_scroll.scroll_to_item(group.active_tab);
         cx.notify();
     }
 
@@ -945,7 +952,91 @@ impl WorkspaceView {
             // 删的在 active 之前 → active 索引前移。
             group.active_tab -= 1;
         }
+        if let Some(group) = self.terminals.get(&key) {
+            group.tab_scroll.scroll_to_item(group.active_tab);
+        }
         cx.notify();
+    }
+
+    /// 在当前 worktree 内循环切换 tab。用于平台级键盘快捷键。
+    fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(group) = self.active.as_ref().and_then(|key| self.terminals.get(key)) else {
+            return;
+        };
+        if group.tabs.is_empty() {
+            return;
+        }
+        let len = group.tabs.len() as isize;
+        let next = (group.active_tab as isize + delta).rem_euclid(len) as usize;
+        self.switch_tab(next, cx);
+    }
+
+    /// 横向滚动 tab 列表。offset 为负值，范围为 `[-max, 0]`。
+    fn scroll_tabs_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let Some(group) = self.active.as_ref().and_then(|key| self.terminals.get(key)) else {
+            return;
+        };
+        let handle = &group.tab_scroll;
+        let mut offset = handle.offset();
+        let max = f32::from(handle.max_offset().width);
+        offset.x = gpui::px((f32::from(offset.x) + delta).clamp(-max, 0.0));
+        handle.set_offset(offset);
+        cx.notify();
+    }
+
+    /// 处理 tab 级全局快捷键。返回 true 表示事件已消费。
+    fn handle_tab_shortcut(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let ks = &event.keystroke;
+        let secondary_only = ks.modifiers.secondary() && ks.modifiers.number_of_modifiers() == 1;
+        let secondary_shift = ks.modifiers.secondary()
+            && ks.modifiers.shift
+            && ks.modifiers.number_of_modifiers() == 2;
+
+        if secondary_only && ks.key == "t" {
+            self.new_terminal_tab(ShellKind::Default, cx);
+            return true;
+        }
+        if secondary_only && ks.key == "w" {
+            if let Some(index) = self
+                .active
+                .as_ref()
+                .and_then(|key| self.terminals.get(key))
+                .map(|group| group.active_tab)
+            {
+                self.close_tab(index, cx);
+            }
+            return true;
+        }
+        if secondary_shift && matches!(ks.key.as_str(), "[" | "{") {
+            self.cycle_tab(-1, cx);
+            return true;
+        }
+        if secondary_shift && matches!(ks.key.as_str(), "]" | "}") {
+            self.cycle_tab(1, cx);
+            return true;
+        }
+        if secondary_only {
+            if let Some(digit) = ks
+                .key
+                .parse::<usize>()
+                .ok()
+                .filter(|digit| (1..=9).contains(digit))
+            {
+                let target = if digit == 9 {
+                    self.active
+                        .as_ref()
+                        .and_then(|key| self.terminals.get(key))
+                        .and_then(|group| group.tabs.len().checked_sub(1))
+                } else {
+                    Some(digit - 1)
+                };
+                if let Some(target) = target {
+                    self.switch_tab(target, cx);
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// 往当前 active tab 的 shell 发 agent 命令(tab 栏 agent 按钮触发)。
@@ -1139,6 +1230,20 @@ impl WorkspaceView {
             .as_ref()
             .and_then(|p| self.terminals.get(p))
             .map(|g| g.active_tab)
+    }
+
+    /// active worktree 的 tab 横向滚动状态(offset x, max width)。
+    #[cfg(feature = "test-support")]
+    pub fn tab_scroll_state_for_test(&self) -> Option<(f32, f32)> {
+        self.active
+            .as_ref()
+            .and_then(|p| self.terminals.get(p))
+            .map(|g| {
+                (
+                    f32::from(g.tab_scroll.offset().x),
+                    f32::from(g.tab_scroll.max_offset().width),
+                )
+            })
     }
 
     /// 直接设置仓库(测试绕过 open_repo_picker 注入 temp repo)。
@@ -1438,6 +1543,11 @@ impl Render for WorkspaceView {
             .flex_row()
             .size_full()
             .bg(rgb(theme::BG))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if this.handle_tab_shortcut(event, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             // 拖 splitter 时:全局监听鼠标移动改宽度、抬起结束。
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _w, cx| {
                 if this.dragging_splitter {

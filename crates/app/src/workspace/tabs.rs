@@ -6,9 +6,11 @@
 //!   active tab 顶部标记线高亮。
 //! - launcher 菜单:`+` 按钮的下拉菜单,分 New Tab(shell 类型)和 Launch Agent 两组。
 
+use std::rc::Rc;
+
 use gpui::{
-    div, px, rgb, Context, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled,
+    div, px, rgb, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
 };
 use gpui_component::tooltip::Tooltip;
 
@@ -18,6 +20,14 @@ use super::{ShellKind, WorkspaceView};
 
 /// tab 栏高度(px),launcher 菜单的 `top` 偏移以此为准。
 const TAB_BAR_H: f32 = 32.0;
+const TAB_MIN_W: f32 = 112.0;
+const TAB_SCROLL_STEP: f32 = 160.0;
+
+type TabAction = Rc<dyn Fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static>;
+
+fn is_activate_key(event: &KeyDownEvent) -> bool {
+    matches!(event.keystroke.key.as_str(), "enter" | "return" | "space")
+}
 
 impl WorkspaceView {
     /// tab 栏。active worktree 无终端时返回 `h_0`(不占空间)。
@@ -47,6 +57,7 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(rgb(theme::BORDER))
             .child(self.tab_list(group, cx))
+            .child(div().flex_none().w_1().h_full().bg(rgb(theme::BORDER)))
             .child(self.quick_launch_button(
                 "quick-launch-codex",
                 "icons/codex.svg",
@@ -82,6 +93,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
     ) -> impl IntoElement {
+        let action: TabAction = Rc::new(move |this, _window, cx| on_click(this, cx));
+        let click_action = action.clone();
         div()
             .id(id)
             .debug_selector(move || id.to_string())
@@ -92,6 +105,13 @@ impl WorkspaceView {
             .items_center()
             .justify_center()
             .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
             .child(
                 gpui::svg()
                     .flex_none()
@@ -101,9 +121,17 @@ impl WorkspaceView {
             )
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
             .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                on_click(this, cx);
+            .active(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                click_action(this, window, cx);
                 cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    action(this, window, cx);
+                    cx.notify();
+                }
             }))
     }
 
@@ -111,17 +139,103 @@ impl WorkspaceView {
     fn tab_list(&self, group: &super::TerminalGroup, cx: &mut Context<Self>) -> impl IntoElement {
         let mut tabs = div()
             .id("tab-list")
-            .flex_1()
+            .debug_selector(|| "tab-list".to_string())
+            .absolute()
+            .inset_0()
             .min_w_0()
             .flex()
             .flex_row()
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&group.tab_scroll);
 
         for (i, tab) in group.tabs.iter().enumerate() {
             tabs = tabs.child(self.tab_item(i, tab, group.active_tab == i, cx));
         }
 
-        tabs
+        let offset = f32::from(group.tab_scroll.offset().x);
+        let max_offset = f32::from(group.tab_scroll.max_offset().width);
+        let mut container = div()
+            .relative()
+            .flex_1()
+            .w_0()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .child(tabs);
+
+        if offset < -0.5 {
+            container = container.child(self.tab_scroll_button(true, cx));
+        }
+        if max_offset > 0.5 && -offset < max_offset - 0.5 {
+            container = container.child(self.tab_scroll_button(false, cx));
+        }
+        container
+    }
+
+    /// tab 溢出后的边缘提示兼滚动按钮。
+    fn tab_scroll_button(&self, left: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = if left {
+            "tab-scroll-left"
+        } else {
+            "tab-scroll-right"
+        };
+        let icon = if left {
+            "icons/arrow-left.svg"
+        } else {
+            "icons/arrow-right.svg"
+        };
+        let delta = if left {
+            TAB_SCROLL_STEP
+        } else {
+            -TAB_SCROLL_STEP
+        };
+        let mut button = div()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .absolute()
+            .top_0()
+            .w(px(24.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(theme::SURFACE_RAISED))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .cursor_pointer()
+            .focusable()
+            .focus(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .active(|style| style.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .child(
+                gpui::svg()
+                    .size(px(12.0))
+                    .path(icon)
+                    .text_color(rgb(theme::ICON_MUTED)),
+            )
+            .tooltip(move |window, cx| {
+                Tooltip::new(if left {
+                    "Scroll tabs left"
+                } else {
+                    "Scroll tabs right"
+                })
+                .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.scroll_tabs_by(delta, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    this.scroll_tabs_by(delta, cx);
+                }
+            }));
+        button = if left {
+            button.left_0()
+        } else {
+            button.right_0()
+        };
+        button
     }
 
     /// `+` 按钮(右侧,固定位置):点击打开 launcher 菜单。
@@ -129,12 +243,20 @@ impl WorkspaceView {
     fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("launcher-trigger")
+            .debug_selector(|| "launcher-trigger".to_string())
             .flex_none()
             .px(theme::space_sm())
             .h_full()
             .flex()
             .items_center()
             .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
             .child(
                 gpui::svg()
                     .flex_none()
@@ -143,10 +265,20 @@ impl WorkspaceView {
                     .text_color(rgb(theme::TEXT_FAINT)),
             )
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .tooltip(|window, cx| Tooltip::new("New tab options").build(window, cx))
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 this.new_worktree_menu_open = false;
                 this.launcher_menu_open = !this.launcher_menu_open;
                 cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    this.new_worktree_menu_open = false;
+                    this.launcher_menu_open = !this.launcher_menu_open;
+                    cx.notify();
+                }
             }))
     }
 
@@ -155,12 +287,20 @@ impl WorkspaceView {
     fn reveal_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("reveal-in-file-manager")
+            .debug_selector(|| "reveal-in-file-manager".to_string())
             .flex_none()
             .px(theme::space_sm())
             .h_full()
             .flex()
             .items_center()
             .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
             .child(
                 gpui::svg()
                     .flex_none()
@@ -169,14 +309,22 @@ impl WorkspaceView {
                     .text_color(rgb(theme::TEXT_FAINT)),
             )
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .tooltip(|window, cx| Tooltip::new("Reveal in file manager").build(window, cx))
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 this.reveal_in_file_manager(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    this.reveal_in_file_manager(cx);
+                }
             }))
     }
 
     /// 单个 tab:标题(动态优先,静态回退)+ `✕` 关闭按钮。
-    /// tab 宽度自适应:`flex_1` + `min_w(80px)` + `max_w(200px)`,少时宽(≤200px)、
-    /// 多时缩窄(≥80px)、超出 80px 下限后 `overflow_x_scroll` 横向滚动。
+    /// tab 宽度自适应:`basis/min 112px` + `max 200px`,少时扩展、多时缩窄，
+    /// 超出 112px 下限后由 tab list 横向滚动。
     fn tab_item(
         &self,
         index: usize,
@@ -188,14 +336,23 @@ impl WorkspaceView {
         let dynamic_title = tab.terminal.read(cx).title().map(|s| s.to_string());
         let static_title = tab.title.clone();
         let title: SharedString = SharedString::from(dynamic_title.unwrap_or(static_title));
+        let title_tooltip = title.clone();
+        let hover_group = SharedString::from(format!("terminal-tab-{index}"));
 
         let close_index = index;
+        let middle_close_index = index;
         let switch_index = index;
+        let keyboard_switch_index = index;
 
         div()
+            .relative()
+            .group(hover_group.clone())
             .id(SharedString::from(format!("tab-{index}")))
-            .flex_1()
-            .min_w(px(80.0))
+            .debug_selector(move || format!("tab-{index}"))
+            .flex_basis(px(TAB_MIN_W))
+            .flex_grow()
+            .flex_shrink()
+            .min_w(px(TAB_MIN_W))
             .max_w(px(200.0))
             .h_full()
             .flex()
@@ -203,51 +360,120 @@ impl WorkspaceView {
             .items_center()
             .gap(theme::space_xs())
             .px(theme::space_sm())
-            // active tab 顶部标记线 + 抬升底色;inactive 平底 + 暗字。
-            .bg(rgb(if is_active {
-                theme::SURFACE_RAISED
-            } else {
-                theme::SURFACE
-            }))
-            .border_t_2()
-            .border_color(rgb(if is_active {
-                theme::TEXT_BRIGHT
-            } else {
-                theme::SURFACE
-            }))
+            // active tab 与终端使用同一底色，形成内容连接；inactive 保持工具栏底色。
+            .bg(rgb(if is_active { theme::BG } else { theme::SURFACE }))
             .text_color(rgb(if is_active {
                 theme::TEXT
             } else {
                 theme::TEXT_DIM
             }))
             .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
             .overflow_hidden()
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 this.switch_tab(switch_index, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _event, _window, cx| {
+                    cx.stop_propagation();
+                    this.close_tab(middle_close_index, cx);
+                }),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if is_activate_key(event) {
+                    cx.stop_propagation();
+                    this.switch_tab(keyboard_switch_index, cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.0))
+                    .bg(rgb(if is_active {
+                        theme::TEXT_BRIGHT
+                    } else {
+                        theme::SURFACE
+                    })),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .w_1()
+                    .bg(rgb(theme::BORDER_SUBTLE)),
+            )
             .child(
                 // 标题(单行省略)。
                 div()
+                    .id(SharedString::from(format!("tab-title-{index}")))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(title),
+                    .child(title)
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(title_tooltip.clone()).build(window, cx)
+                    }),
             )
             .child(
-                // `✕` 关闭:仅关该 tab,不触发 switch(stop_propagation)。
+                // 固定 24px 命中区；inactive 默认透明，hover/focus 显示且不引发布局抖动。
                 div()
                     .id(SharedString::from(format!("tab-close-{index}")))
+                    .debug_selector(move || format!("tab-close-{index}"))
                     .flex_none()
-                    .px(theme::space_xs())
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme::radius())
+                    .cursor_pointer()
+                    .focusable()
+                    .opacity(if is_active { 1.0 } else { 0.0 })
+                    .group_hover(hover_group, |style| style.opacity(1.0))
+                    .focus(|style| {
+                        style
+                            .opacity(1.0)
+                            .bg(rgb(theme::BTN_BG_ACTIVE))
+                            .border_1()
+                            .border_color(rgb(theme::TEXT_DIM))
+                    })
                     .text_color(rgb(theme::TEXT_FAINT))
-                    .hover(|s| s.text_color(rgb(theme::STATE_ERROR)))
-                    .child(SharedString::from("✕"))
+                    .hover(|s| {
+                        s.bg(rgb(theme::BTN_BG_HOVER))
+                            .text_color(rgb(theme::STATE_ERROR))
+                    })
+                    .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
+                    .child(
+                        gpui::svg()
+                            .size(px(12.0))
+                            .path("icons/x.svg")
+                            .text_color(rgb(theme::TEXT_FAINT)),
+                    )
+                    .tooltip(|window, cx| Tooltip::new("Close tab").build(window, cx))
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         cx.stop_propagation();
                         this.close_tab(close_index, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        if is_activate_key(event) {
+                            cx.stop_propagation();
+                            this.close_tab(index, cx);
+                        }
                     })),
             )
     }
@@ -366,6 +592,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
     ) -> Stateful<gpui::Div> {
+        let action: TabAction = Rc::new(move |this, _window, cx| on_click(this, cx));
+        let click_action = action.clone();
         let mut item = div()
             .id(SharedString::from(format!("menu-{label}")))
             .px(theme::space_md())
@@ -375,11 +603,37 @@ impl WorkspaceView {
             .items_center()
             .gap(theme::space_xs())
             .cursor_pointer()
+            .focusable()
+            .focus(|style| {
+                style
+                    .bg(rgb(theme::BTN_BG_ACTIVE))
+                    .border_1()
+                    .border_color(rgb(theme::TEXT_DIM))
+            })
             .text_color(rgb(theme::TEXT))
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                on_click(this, cx);
+            .active(|s| s.bg(rgb(theme::BTN_BG_ACTIVE)))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                click_action(this, window, cx);
                 cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        cx.stop_propagation();
+                        window.focus_prev();
+                    }
+                    "down" => {
+                        cx.stop_propagation();
+                        window.focus_next();
+                    }
+                    _ if is_activate_key(event) => {
+                        cx.stop_propagation();
+                        action(this, window, cx);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
             }));
 
         if let Some(path) = icon {
