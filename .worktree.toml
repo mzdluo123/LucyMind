@@ -46,3 +46,6 @@ args = ["--auto"]
 "lucy/merry-sage-wolf-grove" = "test"
 "lucy/proud-onyx-lynx-vale" = "终端padding"
 "lucy/brave-slate-elk-cliff" = "半个格子修复"
+"fix/input-theme" = "main"
+"lucy/proud-ruby-lynx-ridge" = "terminal改造"
+"lucy/jolly-lime-hawk-creek" = "右上角加号改造"
