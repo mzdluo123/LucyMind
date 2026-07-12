@@ -87,6 +87,7 @@ impl WorkspaceView {
             )
             .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
             .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.new_worktree_menu_open = false;
                 this.launcher_menu_open = !this.launcher_menu_open;
                 cx.notify();
             }))
