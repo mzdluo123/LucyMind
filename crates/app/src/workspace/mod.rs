@@ -86,6 +86,16 @@ struct PendingClose {
     dirty_count: usize,
 }
 
+/// 后台创建与 PostCreate 完成后，交回 UI 线程的收尾数据。
+struct CreatedWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+    branch: String,
+    launch: NewWorktreeLaunch,
+    key: PathBuf,
+    hook_run: hooks::HookRun,
+}
+
 /// 设置面板的表单状态(打开设置弹窗时创建,含各输入框的 gpui-component
 /// InputState + 两个非文本项)。字段一一对应 [`config::EditableSettings`]。
 ///
@@ -193,6 +203,8 @@ pub struct WorkspaceView {
     /// 当前显示在主区的 worktree 路径(不是 tab 索引;tab 级 active 存在 group 里)。
     active: Option<PathBuf>,
     status: Option<Status>,
+    /// 后台创建 worktree / 执行 PostCreate 中。用于阻止重复触发并驱动禁用态。
+    creating_worktree: bool,
     /// 当前 active worktree branch 对应的 GitHub PR。无 PR/查询失败时为 None。
     pull_request: Option<PullRequest>,
     /// PR 异步查询代次；只接受最新代次的返回值，避免切分支后的迟到响应覆盖 UI。
@@ -290,6 +302,7 @@ impl WorkspaceView {
             terminals: std::collections::HashMap::new(),
             active: None,
             status: None,
+            creating_worktree: false,
             pull_request: None,
             pull_request_request: 0,
             pending_close: None,
@@ -604,6 +617,9 @@ impl WorkspaceView {
     /// 选择 Terminal 时只启动 shell；选择 agent 时在首个 shell tab 中立即运行
     /// 对应命令。之后仍可通过 tab 栏 launcher 追加 shell 或 agent tab。
     fn new_worktree(&mut self, launch: NewWorktreeLaunch, cx: &mut Context<Self>) {
+        if self.creating_worktree {
+            return;
+        }
         let Some(repo) = self.repo.clone() else {
             self.set_status("请先打开一个 git 仓库", true);
             return;
@@ -622,98 +638,159 @@ impl WorkspaceView {
         let parent = config::resolve_sibling_dir(&self.config.worktree.dir, &repo_name);
         let parent_dir = self.host.join_path(&repo, &parent);
         let wt_path = git::sibling_worktree_path(self.host.as_ref(), &parent_dir, &branch);
+        let host = self.host.clone();
+        let hooks_config = self.config.hooks.clone();
+        let copy_config = self.config.copy.clone();
+        let branch_for_status = branch.clone();
+        self.creating_worktree = true;
+        self.new_worktree_menu_open = false;
+        self.set_status(format!("正在创建 {branch_for_status}…"), false);
+        cx.notify();
 
-        // 1) 建 worktree(带分支占用检查)。
-        let add_res = git::add(
-            self.host.as_ref(),
-            &repo,
-            &wt_path,
-            &CreateMode::NewBranch {
-                branch: branch.clone(),
-                base,
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let add_host = host.clone();
+                let add_repo = repo.clone();
+                let add_path = wt_path.clone();
+                let add_branch = branch.clone();
+                let add_result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        git::add(
+                            add_host.as_ref(),
+                            &add_repo,
+                            &add_path,
+                            &CreateMode::NewBranch {
+                                branch: add_branch,
+                                base,
+                            },
+                        )
+                        .map_err(|error| error.to_string())
+                    })
+                    .await;
+
+                if let Err(error) = add_result {
+                    let _ = this.update(cx, |view, cx| {
+                        view.creating_worktree = false;
+                        view.set_status(format!("建 worktree 失败:{error}"), true);
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                let _ = this.update(cx, |view, cx| {
+                    view.set_status(
+                        format!("正在运行 {branch_for_status} 的 PostCreate…"),
+                        false,
+                    );
+                    cx.notify();
+                });
+
+                let hook_host = host.clone();
+                let hook_repo = repo.clone();
+                let hook_path = wt_path.clone();
+                let hook_branch = branch.clone();
+                let (run, wt_key) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let hook_context = HookContext {
+                            worktree_path: hook_path.clone(),
+                            worktree_branch: hook_branch.clone(),
+                            worktree_name: hook_branch.replace('/', "-"),
+                            repo_root: hook_repo.clone(),
+                        };
+                        let run = hooks::run_event(
+                            hook_host.as_ref(),
+                            LifecycleEvent::PostCreate,
+                            &hooks_config,
+                            &copy_config,
+                            &hook_context,
+                            |_step| {},
+                        );
+                        let _ = git::lock(
+                            hook_host.as_ref(),
+                            &hook_repo,
+                            &hook_path,
+                            Some("agent running"),
+                        );
+                        let key = canon(hook_host.as_ref(), &hook_path);
+                        (run, key)
+                    })
+                    .await;
+
+                let _ = this.update(cx, |view, cx| {
+                    view.finish_new_worktree(
+                        CreatedWorktree {
+                            repo,
+                            path: wt_path,
+                            branch,
+                            launch,
+                            key: wt_key,
+                            hook_run: run,
+                        },
+                        cx,
+                    );
+                });
             },
-        );
-        if let Err(e) = add_res {
-            self.set_status(format!("建 worktree 失败:{e}"), true);
-            return;
-        }
+        )
+        .detach();
+    }
 
-        // 2) postCreate hook(copy + 命令),注入环境变量。
-        let ctx = HookContext {
-            worktree_path: wt_path.clone(),
-            worktree_branch: branch.clone(),
-            worktree_name: branch.replace('/', "-"),
-            repo_root: repo.clone(),
-        };
-        let run = hooks::run_event(
-            self.host.as_ref(),
-            LifecycleEvent::PostCreate,
-            &self.config.hooks,
-            &self.config.copy,
-            &ctx,
-            |_step| {},
-        );
-        if run.had_failure() {
-            for step in run.steps.iter().filter(|step| !step.success) {
-                log::error!(
-                    "postCreate hook 失败({}): {}",
-                    step.description,
-                    step.message.as_deref().unwrap_or("未知错误")
-                );
-            }
-            self.set_status(
-                "worktree 已建,但 postCreate hook 有失败步骤(见日志)".to_string(),
-                true,
+    fn finish_new_worktree(&mut self, created: CreatedWorktree, cx: &mut Context<Self>) {
+        let hook_failed = created.hook_run.had_failure();
+        for step in created.hook_run.steps.iter().filter(|step| !step.success) {
+            log::error!(
+                "postCreate hook 失败({}): {}",
+                step.description,
+                step.message.as_deref().unwrap_or("未知错误")
             );
-            // 不回滚 worktree(计划:hook 失败不删 worktree)。
         }
 
-        // 3) 先开首个 shell tab；若选了 agent，立即在这个 tab 中启动它。
-        let wt_key = canon(self.host.as_ref(), &wt_path);
-        let tab = self.spawn_shell_tab(&wt_key, ShellKind::Default, cx);
+        let tab = self.spawn_shell_tab(&created.key, ShellKind::Default, cx);
         self.terminals.insert(
-            wt_key.clone(),
+            created.key.clone(),
             TerminalGroup {
                 tabs: vec![tab],
                 active_tab: 0,
                 tab_scroll: ScrollHandle::new(),
             },
         );
-        self.active = Some(wt_key.clone());
-        self.refresh_pull_request(wt_key, cx);
-        if let NewWorktreeLaunch::Agent(agent_name) = &launch {
+        self.active = Some(created.key.clone());
+        self.refresh_pull_request(created.key, cx);
+        if let NewWorktreeLaunch::Agent(agent_name) = &created.launch {
             self.send_agent_command(agent_name, cx);
         }
 
-        // 4) agent 运行期锁定 worktree,防误删/prune。
-        let _ = git::lock(self.host.as_ref(), &repo, &wt_path, Some("agent running"));
-
-        // 5) 注册到 session 注册表(标记这是本工具建的)并持久化。
-        let session_agent = match &launch {
+        let session_agent = match &created.launch {
             NewWorktreeLaunch::Terminal => None,
             NewWorktreeLaunch::Agent(name) => Some(name.clone()),
         };
         self.registry.register(
-            &repo,
+            &created.repo,
             Session {
-                path: wt_path.clone(),
-                branch: branch.clone(),
+                path: created.path,
+                branch: created.branch.clone(),
                 agent: session_agent,
                 created_at: session::now_secs(),
             },
         );
         self.persist_registry();
-
         self.refresh_worktrees();
-        let launched = match launch {
-            NewWorktreeLaunch::Terminal => "Terminal".to_string(),
-            NewWorktreeLaunch::Agent(name) => lucy_core::agent::builtin_agents()
-                .iter()
-                .find(|agent| agent.name == name)
-                .map(|agent| agent.display.to_string())
-                .unwrap_or(name),
-        };
-        self.set_status(format!("已在 {branch} 启动 {launched}"), false);
+        self.creating_worktree = false;
+
+        if hook_failed {
+            self.set_status("worktree 已建,但 PostCreate 有失败步骤(见日志)", true);
+        } else {
+            let launched = match created.launch {
+                NewWorktreeLaunch::Terminal => "Terminal".to_string(),
+                NewWorktreeLaunch::Agent(name) => lucy_core::agent::builtin_agents()
+                    .iter()
+                    .find(|agent| agent.name == name)
+                    .map(|agent| agent.display.to_string())
+                    .unwrap_or(name),
+            };
+            self.set_status(format!("已在 {} 启动 {launched}", created.branch), false);
+        }
         cx.notify();
     }
 
@@ -1127,6 +1204,12 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn current_status(&self) -> Option<&str> {
         self.status.as_ref().map(|s| s.text.as_ref())
+    }
+
+    /// 是否正在后台创建 worktree / 执行 PostCreate。
+    #[cfg(feature = "test-support")]
+    pub fn is_creating_worktree_for_test(&self) -> bool {
+        self.creating_worktree
     }
 
     /// 当前 active branch 的 GitHub PR。

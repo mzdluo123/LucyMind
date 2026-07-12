@@ -20,7 +20,11 @@ async fn new_worktree_creates_terminal_and_switches_active(cx: &mut TestAppConte
     cx.update(|cx| {
         workspace.update(cx, |v, cx| v.new_worktree_for_test(cx));
     });
-    cx.run_until_parked();
+    wait_for(
+        cx,
+        |cx| !cx.read(|cx| workspace.read(cx).is_creating_worktree_for_test()),
+        Duration::from_secs(15),
+    );
 
     // git::list 含新分支(worktree_count 增加)。
     let count_after = cx.read(|cx| workspace.read(cx).worktree_count());
@@ -105,6 +109,62 @@ async fn new_worktree_start_menu_state_toggles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn new_worktree_runs_in_background_and_ignores_duplicate_start(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let slow_hook = if cfg!(windows) {
+        "ping -n 2 127.0.0.1 >NUL"
+    } else {
+        "sleep 0.3"
+    };
+    std::fs::write(
+        repo.join(".worktree.toml"),
+        format!(
+            "[worktree]\nlocation = \"sibling\"\ndir = \"../{{repo}}-worktrees\"\n\
+             [hooks]\npost_create = [\"{slow_hook}\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let (workspace, _window) = build_workspace(cx, Some(repo));
+    let count_before = cx.read(|cx| workspace.read(cx).worktree_count());
+
+    cx.update(|cx| {
+        workspace.update(cx, |view, cx| view.new_worktree_for_test(cx));
+    });
+    assert!(
+        cx.read(|cx| workspace.read(cx).is_creating_worktree_for_test()),
+        "starting should return immediately with a visible busy state"
+    );
+    assert!(
+        cx.read(|cx| {
+            workspace
+                .read(cx)
+                .current_status()
+                .is_some_and(|status| status.starts_with("正在创建 "))
+        }),
+        "the first background stage should be visible in the status bar"
+    );
+
+    // A second activation while the first request is running must be a no-op.
+    cx.update(|cx| {
+        workspace.update(cx, |view, cx| view.new_worktree_for_test(cx));
+    });
+
+    wait_for(
+        cx,
+        |cx| !cx.read(|cx| workspace.read(cx).is_creating_worktree_for_test()),
+        Duration::from_secs(15),
+    );
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).worktree_count()),
+        count_before + 1,
+        "duplicate activation must not create a second worktree"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
 async fn new_worktree_with_agent_starts_agent_in_first_tab(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo_with_agent();
     let toml = if cfg!(windows) {
@@ -123,6 +183,12 @@ async fn new_worktree_with_agent_starts_agent_in_first_tab(cx: &mut TestAppConte
             view.new_worktree_with_agent_for_test("test", cx)
         });
     });
+
+    wait_for(
+        cx,
+        |cx| !cx.read(|cx| workspace.read(cx).is_creating_worktree_for_test()),
+        Duration::from_secs(15),
+    );
 
     let active = cx
         .read(|cx| workspace.read(cx).active_path().map(ToOwned::to_owned))
