@@ -116,6 +116,13 @@ pub enum ShellKind {
     Pwsh,
 }
 
+/// 新建 worktree 后首个会话的启动方式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewWorktreeLaunch {
+    Terminal,
+    Agent(String),
+}
+
 impl ShellKind {
     /// 转成 `TerminalView::new` 的 `command` 参数。
     /// `None` = 系统默认 shell;`Some((program, args))` = 指定程序。
@@ -202,6 +209,8 @@ pub struct WorkspaceView {
     settings: Option<SettingsForm>,
     /// launcher 菜单(`+` 按钮下拉)是否打开。
     launcher_menu_open: bool,
+    /// 主仓行 `+` 的新建 worktree 启动方式菜单是否打开。
+    new_worktree_menu_open: bool,
     /// 路径输入选择器(Some = 打开中)。Zed 风格:文本输入 + 实时目录补全。
     /// 替代旧的 open_repo_choice_dialog + wsl_browser_dialog,统一本地/WSL 入口。
     path_picker: Option<gpui::Entity<crate::ui::PathPicker>>,
@@ -289,6 +298,7 @@ impl WorkspaceView {
             alias_input: None,
             settings: None,
             launcher_menu_open: false,
+            new_worktree_menu_open: false,
             path_picker: None,
             focus: cx.focus_handle(),
             #[cfg(feature = "test-support")]
@@ -586,12 +596,11 @@ impl WorkspaceView {
         list
     }
 
-    /// 主流程:建 worktree → postCreate hook → 开一个 shell 终端 tab。
+    /// 主流程:建 worktree → postCreate hook → 按用户选择启动 terminal 或 agent。
     ///
-    /// agent 不再自动 spawn —— 用户在新 shell 里通过 tab 栏的 agent 按钮发命令
-    /// 启动(`send_agent_command`),有更多控制空间(可先跑命令、可 Ctrl+C 回到
-    /// shell、同终端跑多个 agent)。
-    fn new_worktree(&mut self, cx: &mut Context<Self>) {
+    /// 选择 Terminal 时只启动 shell；选择 agent 时在首个 shell tab 中立即运行
+    /// 对应命令。之后仍可通过 tab 栏 launcher 追加 shell 或 agent tab。
+    fn new_worktree(&mut self, launch: NewWorktreeLaunch, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             self.set_status("请先打开一个 git 仓库", true);
             return;
@@ -656,7 +665,7 @@ impl WorkspaceView {
             // 不回滚 worktree(计划:hook 失败不删 worktree)。
         }
 
-        // 3) 开 shell 终端 tab(不自动起 agent;用户通过 tab 栏 agent 按钮发命令)。
+        // 3) 先开首个 shell tab；若选了 agent，立即在这个 tab 中启动它。
         let wt_key = canon(self.host.as_ref(), &wt_path);
         let tab = self.spawn_shell_tab(&wt_key, ShellKind::Default, cx);
         self.terminals.insert(
@@ -668,26 +677,39 @@ impl WorkspaceView {
         );
         self.active = Some(wt_key.clone());
         self.refresh_pull_request(wt_key, cx);
+        if let NewWorktreeLaunch::Agent(agent_name) = &launch {
+            self.send_agent_command(agent_name, cx);
+        }
 
         // 4) agent 运行期锁定 worktree,防误删/prune。
         let _ = git::lock(self.host.as_ref(), &repo, &wt_path, Some("agent running"));
 
         // 5) 注册到 session 注册表(标记这是本工具建的)并持久化。
-        //    agent 字段记 None —— 用户后续通过 tab 栏按钮选择 agent,
-        //    建时不知会用哪个 agent(可能在一个 shell 里跑多个)。
+        let session_agent = match &launch {
+            NewWorktreeLaunch::Terminal => None,
+            NewWorktreeLaunch::Agent(name) => Some(name.clone()),
+        };
         self.registry.register(
             &repo,
             Session {
                 path: wt_path.clone(),
                 branch: branch.clone(),
-                agent: None,
+                agent: session_agent,
                 created_at: session::now_secs(),
             },
         );
         self.persist_registry();
 
         self.refresh_worktrees();
-        self.set_status(format!("已在 {branch} 开 shell"), false);
+        let launched = match launch {
+            NewWorktreeLaunch::Terminal => "Terminal".to_string(),
+            NewWorktreeLaunch::Agent(name) => lucy_core::agent::builtin_agents()
+                .iter()
+                .find(|agent| agent.name == name)
+                .map(|agent| agent.display.to_string())
+                .unwrap_or(name),
+        };
+        self.set_status(format!("已在 {branch} 启动 {launched}"), false);
         cx.notify();
     }
 
@@ -1128,7 +1150,13 @@ impl WorkspaceView {
     /// 直接触发 new_worktree(测试绕过 UI 点击)。
     #[cfg(feature = "test-support")]
     pub fn new_worktree_for_test(&mut self, cx: &mut Context<Self>) {
-        self.new_worktree(cx);
+        self.new_worktree(NewWorktreeLaunch::Terminal, cx);
+    }
+
+    /// 以指定 agent 新建 worktree(测试绕过启动方式菜单)。
+    #[cfg(feature = "test-support")]
+    pub fn new_worktree_with_agent_for_test(&mut self, agent_name: &str, cx: &mut Context<Self>) {
+        self.new_worktree(NewWorktreeLaunch::Agent(agent_name.to_string()), cx);
     }
 
     /// 直接触发 request_close(测试绕过 UI 点击)。
@@ -1225,6 +1253,29 @@ impl WorkspaceView {
     #[cfg(feature = "test-support")]
     pub fn set_launcher_menu_open_for_test(&mut self, open: bool) {
         self.launcher_menu_open = open;
+    }
+
+    /// 读主仓 `+` 启动方式菜单是否打开。
+    #[cfg(feature = "test-support")]
+    pub fn new_worktree_menu_open_for_test(&self) -> bool {
+        self.new_worktree_menu_open
+    }
+
+    /// 设置主仓 `+` 启动方式菜单状态(测试模拟点击)。
+    #[cfg(feature = "test-support")]
+    pub fn set_new_worktree_menu_open_for_test(&mut self, open: bool) {
+        self.new_worktree_menu_open = open;
+    }
+
+    /// 读取指定 worktree 在 session registry 中记录的初始 agent。
+    #[cfg(feature = "test-support")]
+    pub fn session_agent_for_test(&self, path: &std::path::Path) -> Option<String> {
+        let repo = self.repo.as_ref()?;
+        self.registry
+            .list_for_repo(repo)
+            .into_iter()
+            .find(|session| same_path(self.host.as_ref(), &session.path, path))
+            .and_then(|session| session.agent)
     }
 
     /// 取指定路径 active tab 的静态回退标题(`TerminalTab.title`)。
@@ -1380,9 +1431,23 @@ impl Render for WorkspaceView {
                     }
                 }),
             )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    if this.new_worktree_menu_open {
+                        this.new_worktree_menu_open = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 if this.launcher_menu_open && ev.keystroke.key == "escape" {
                     this.launcher_menu_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                if this.new_worktree_menu_open && ev.keystroke.key == "escape" {
+                    this.new_worktree_menu_open = false;
                     cx.notify();
                     cx.stop_propagation();
                 }

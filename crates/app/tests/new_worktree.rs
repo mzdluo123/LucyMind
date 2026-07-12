@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::TestAppContext;
 
-use common::{build_workspace, shutdown_workspace, temp_repo, wait_for};
+use common::{build_workspace, shutdown_workspace, temp_repo, temp_repo_with_agent, wait_for};
 
 mod common;
 
@@ -69,6 +69,93 @@ async fn new_worktree_terminal_renders_pty_output(cx: &mut TestAppContext) {
             })
         },
         Duration::from_secs(15),
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_worktree_start_menu_state_toggles(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo();
+    let (workspace, _w) = build_workspace(cx, Some(repo));
+    cx.run_until_parked();
+
+    assert!(
+        !cx.read(|cx| workspace.read(cx).new_worktree_menu_open_for_test()),
+        "start menu should be closed initially"
+    );
+    cx.update(|cx| {
+        workspace.update(cx, |view, _| view.set_new_worktree_menu_open_for_test(true));
+    });
+    assert!(
+        cx.read(|cx| workspace.read(cx).new_worktree_menu_open_for_test()),
+        "start menu should open from the sidebar plus button"
+    );
+    cx.update(|cx| {
+        workspace.update(cx, |view, _| {
+            view.set_new_worktree_menu_open_for_test(false)
+        });
+    });
+    assert!(
+        !cx.read(|cx| workspace.read(cx).new_worktree_menu_open_for_test()),
+        "start menu should close after a selection"
+    );
+
+    shutdown_workspace(cx, &workspace);
+}
+
+#[gpui::test]
+async fn new_worktree_with_agent_starts_agent_in_first_tab(cx: &mut TestAppContext) {
+    let (_dir, repo) = temp_repo_with_agent();
+    let toml = if cfg!(windows) {
+        "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\n\
+         [agents.test]\ncommand = \"cmd.exe\"\nargs = [\"/c\", \"echo NEW_WORKTREE_AGENT_READY\"]\n"
+    } else {
+        "[worktree]\nlocation = \"sibling\"\ndir = \"../{repo}-worktrees\"\n\
+         [agents.test]\ncommand = \"sh\"\nargs = [\"-c\", \"printf NEW_WORKTREE_AGENT_READY\"]\n"
+    };
+    std::fs::write(repo.join(".worktree.toml"), toml).unwrap();
+
+    let (workspace, _w) = build_workspace(cx, Some(repo));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        workspace.update(cx, |view, cx| {
+            view.new_worktree_with_agent_for_test("test", cx)
+        });
+    });
+
+    let active = cx
+        .read(|cx| workspace.read(cx).active_path().map(ToOwned::to_owned))
+        .expect("new worktree should become active");
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).tab_count(&active)),
+        1,
+        "selected agent should use the first tab rather than add a second tab"
+    );
+    assert_eq!(
+        cx.read(|cx| workspace.read(cx).session_agent_for_test(&active)),
+        Some("test".to_string()),
+        "session registry should remember the selected startup agent"
+    );
+
+    wait_for(
+        cx,
+        |cx| {
+            let terminal =
+                cx.update(|cx| workspace.update(cx, |view, _| view.terminal_at(&active).cloned()));
+            terminal.is_some_and(|terminal| {
+                cx.update(|cx| {
+                    terminal.update(cx, |view, _| view.poll_events_for_test());
+                });
+                cx.read(|cx| {
+                    terminal
+                        .read(cx)
+                        .snapshot_text()
+                        .contains("NEW_WORKTREE_AGENT_READY")
+                })
+            })
+        },
+        Duration::from_secs(30),
     );
 
     shutdown_workspace(cx, &workspace);

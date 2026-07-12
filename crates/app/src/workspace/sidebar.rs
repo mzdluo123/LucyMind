@@ -3,11 +3,13 @@
 //! 作为 [`WorkspaceView`](super::WorkspaceView) 的 `impl` 方法(跨文件 impl),
 //! 直接访问其状态。样式 token 走 [`crate::theme`]。
 
-use gpui::{div, prelude::*, rgb, Context, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, prelude::*, px, rgb, Context, IntoElement, ParentElement, SharedString, Stateful, Styled,
+};
 
 use crate::theme;
 
-use super::WorkspaceView;
+use super::{NewWorktreeLaunch, WorkspaceView};
 
 impl WorkspaceView {
     pub(super) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -270,27 +272,32 @@ impl WorkspaceView {
         // `+` 新建 worktree:仅主仓行显示(在此仓库上开 worktree)。
         // 与 ✎ / ✕ 同风格:文字按钮、group-hover 染色、stop_propagation 防误触行点击。
         if is_main {
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("new-wt-{i}")))
-                    .group("new-wt-btn")
-                    .flex_none()
-                    .px(theme::space_xs())
-                    .cursor_pointer()
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .child(
-                        gpui::svg()
-                            .flex_none()
-                            .size(gpui::px(14.0))
-                            .path("icons/plus.svg")
-                            .text_color(rgb(theme::TEXT_FAINT))
-                            .group_hover("new-wt-btn", |s| s.text_color(rgb(theme::TEXT))),
-                    )
-                    .on_click(cx.listener(|this, _ev, _w, cx| {
-                        cx.stop_propagation();
-                        this.new_worktree(cx);
-                    })),
-            );
+            let trigger = div()
+                .id(SharedString::from(format!("new-wt-{i}")))
+                .group("new-wt-btn")
+                .flex_none()
+                .px(theme::space_xs())
+                .cursor_pointer()
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(
+                    gpui::svg()
+                        .flex_none()
+                        .size(gpui::px(14.0))
+                        .path("icons/plus.svg")
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .group_hover("new-wt-btn", |s| s.text_color(rgb(theme::TEXT))),
+                )
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.launcher_menu_open = false;
+                    this.new_worktree_menu_open = !this.new_worktree_menu_open;
+                    cx.notify();
+                }));
+            let mut launcher = div().relative().flex_none().child(trigger);
+            if self.new_worktree_menu_open {
+                launcher = launcher.child(gpui::deferred(self.new_worktree_menu(cx)));
+            }
+            row = row.child(launcher);
         }
 
         // ✕ 关闭:仅非主仓(主仓不是 worktree,不可关)。
@@ -316,5 +323,90 @@ impl WorkspaceView {
         }
 
         row
+    }
+
+    /// 主仓 `+` 的启动方式菜单。选择后才创建 worktree，首个会话即为所选项。
+    fn new_worktree_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut card = div()
+            .absolute()
+            .top(px(24.0))
+            .right_0()
+            .min_w(px(180.0))
+            .bg(rgb(theme::SURFACE))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .rounded(theme::radius())
+            .occlude()
+            .py(theme::space_xs())
+            .flex()
+            .flex_col()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_this, _ev, _w, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .px(theme::space_sm())
+                    .py(theme::space_xs())
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .child(SharedString::from("Start with")),
+            )
+            .child(
+                self.new_worktree_menu_item("Terminal", None, cx, |this, cx| {
+                    this.new_worktree_menu_open = false;
+                    this.new_worktree(NewWorktreeLaunch::Terminal, cx);
+                }),
+            );
+
+        for agent in lucy_core::agent::builtin_agents() {
+            let name = agent.name.to_string();
+            let icon = crate::assets::agent_icon(agent.name).map(SharedString::from);
+            card = card.child(self.new_worktree_menu_item(
+                agent.display,
+                icon,
+                cx,
+                move |this, cx| {
+                    this.new_worktree_menu_open = false;
+                    this.new_worktree(NewWorktreeLaunch::Agent(name.clone()), cx);
+                },
+            ));
+        }
+        card
+    }
+
+    fn new_worktree_menu_item(
+        &self,
+        label: &str,
+        icon: Option<SharedString>,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
+    ) -> Stateful<gpui::Div> {
+        let mut item = div()
+            .id(SharedString::from(format!("new-worktree-{label}")))
+            .px(theme::space_md())
+            .py(theme::space_xs())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(theme::space_xs())
+            .cursor_pointer()
+            .text_color(rgb(theme::TEXT))
+            .hover(|style| style.bg(rgb(theme::BTN_BG_HOVER)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                on_click(this, cx);
+                cx.notify();
+            }));
+        if let Some(path) = icon {
+            item = item.child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(14.0))
+                    .path(path)
+                    .text_color(rgb(theme::TEXT)),
+            );
+        }
+        item.child(SharedString::from(label.to_string()))
     }
 }
