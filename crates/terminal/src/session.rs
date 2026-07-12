@@ -22,6 +22,149 @@ use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 
 use crate::palette;
 
+type Command = (String, Vec<String>);
+
+#[cfg(target_family = "unix")]
+mod platform {
+    use super::{Command, EventLoopSender, Msg};
+    use alacritty_terminal::tty;
+
+    pub(super) struct Child {
+        pid: i32,
+    }
+
+    pub(super) fn prepare_command(command: Option<Command>) -> Option<Command> {
+        command
+    }
+
+    pub(super) fn capture_child(pty: &tty::Pty) -> Child {
+        Child {
+            pid: pty.child().id() as i32,
+        }
+    }
+
+    pub(super) fn shutdown_child(child: &Child, loop_tx: EventLoopSender) {
+        if child.pid <= 0 {
+            let _ = loop_tx.send(Msg::Shutdown);
+            return;
+        }
+
+        // Give interactive programs a chance to clean up before forcing exit.
+        unsafe {
+            libc::kill(child.pid, libc::SIGHUP);
+        }
+        let pid = child.pid;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if alive {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+            let _ = loop_tx.send(Msg::Shutdown);
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::prepare_command;
+
+        #[test]
+        fn command_is_passed_through() {
+            let command = Some(("/bin/sh".to_string(), vec!["-l".to_string()]));
+            assert_eq!(prepare_command(command.clone()), command);
+        }
+    }
+}
+
+#[cfg(target_family = "windows")]
+mod platform {
+    use super::{Command, EventLoopSender, Msg};
+    use alacritty_terminal::tty;
+    use std::path::Path;
+
+    pub(super) struct Child;
+
+    pub(super) fn prepare_command(command: Option<Command>) -> Option<Command> {
+        command.map(|(program, args)| {
+            if !needs_cmd_wrapper(&program) {
+                return (program, args);
+            }
+
+            let mut command_args = Vec::with_capacity(args.len() + 2);
+            command_args.push("/C".to_string());
+            command_args.push(program);
+            command_args.extend(args);
+            ("cmd.exe".to_string(), command_args)
+        })
+    }
+
+    pub(super) fn capture_child(_pty: &tty::Pty) -> Child {
+        Child
+    }
+
+    pub(super) fn shutdown_child(_child: &Child, loop_tx: EventLoopSender) {
+        // Closing ConPTY through EventLoop makes the child observe EOF and exit.
+        let _ = loop_tx.send(Msg::Shutdown);
+    }
+
+    /// `CreateProcessW` cannot directly execute `.cmd` and other command shims.
+    fn needs_cmd_wrapper(program: &str) -> bool {
+        match Path::new(program)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) => !extension.eq_ignore_ascii_case("exe"),
+            None => true,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::prepare_command;
+
+        #[test]
+        fn executable_is_passed_through() {
+            let command = Some(("tool.EXE".to_string(), vec!["--version".to_string()]));
+            assert_eq!(prepare_command(command.clone()), command);
+        }
+
+        #[test]
+        fn command_shim_is_wrapped_with_cmd() {
+            let prepared = prepare_command(Some((
+                "codex.cmd".to_string(),
+                vec!["--version".to_string()],
+            )));
+
+            assert_eq!(
+                prepared,
+                Some((
+                    "cmd.exe".to_string(),
+                    vec![
+                        "/C".to_string(),
+                        "codex.cmd".to_string(),
+                        "--version".to_string(),
+                    ],
+                ))
+            );
+        }
+
+        #[test]
+        fn bare_command_is_wrapped_with_cmd() {
+            let prepared = prepare_command(Some(("codex".to_string(), Vec::new())));
+
+            assert_eq!(
+                prepared,
+                Some((
+                    "cmd.exe".to_string(),
+                    vec!["/C".to_string(), "codex".to_string()],
+                ))
+            );
+        }
+    }
+}
+
 /// 转发给 app 层的会话事件(从内核事件精简而来)。
 #[derive(Debug, Clone)]
 pub enum TermEvent {
@@ -123,9 +266,7 @@ pub struct TerminalSession {
     events_rx: Receiver<ProxyEvent>,
     dimensions: TermDimensions,
     child_exited: Option<i32>,
-    /// agent/shell 子进程 PID(spawn 前捕获),用于两段式优雅停止。
-    #[cfg_attr(target_family = "windows", allow(dead_code))]
-    child_pid: i32,
+    child: platform::Child,
 }
 
 impl TerminalSession {
@@ -149,22 +290,8 @@ impl TerminalSession {
         let term = Term::new(config, &dimensions, proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        // 2) PTY 选项。
-        // Windows: CreateProcessW 只能执行 .exe,不能直接跑 .cmd/.ps1 等 shim。
-        // npm/pnpm 全局安装的 CLI(claude/codex 等)只有 .cmd shim,所以需要
-        // 用 cmd.exe /C 包装,让 cmd.exe 解析 PATHEXT 找到 .cmd。
-        #[cfg(target_family = "windows")]
-        let command = command.map(|(program, args)| {
-            if needs_cmd_wrapper(&program) {
-                let mut full = Vec::with_capacity(args.len() + 2);
-                full.push("/C".to_string());
-                full.push(program.clone());
-                full.extend(args);
-                ("cmd.exe".to_string(), full)
-            } else {
-                (program, args)
-            }
-        });
+        // 2) PTY 选项。Windows 在平台层包装 `.cmd` 等命令 shim。
+        let command = platform::prepare_command(command);
 
         // Windows 上 tty::Options 多一个平台专属字段 escape_args —— 靠
         // ..Default::default() 补齐,故必须保留。非 Windows(mac/Linux)所有字段
@@ -179,16 +306,8 @@ impl TerminalSession {
         };
         let pty = tty::new(&pty_options, dimensions.window_size(), 0)?;
 
-        // spawn 前捕获子进程 PID —— spawn 后 pty 移进后台线程,拿不到了。
-        // Unix: pty.child() 返回 &Child;Windows: 用 child_watcher().pid()。
-        #[cfg(target_family = "unix")]
-        let child_pid = pty.child().id() as i32;
-        #[cfg(target_family = "windows")]
-        let child_pid = pty
-            .child_watcher()
-            .pid()
-            .map(|p| p.get() as i32)
-            .unwrap_or(0);
+        // spawn 后 pty 会移进后台线程，需要的平台子进程状态在此提前捕获。
+        let child = platform::capture_child(&pty);
 
         // 3) EventLoop:后台线程自动读 PTY → 解析进 Term → 发 Wakeup。
         let event_loop = EventLoop::new(
@@ -207,7 +326,7 @@ impl TerminalSession {
             events_rx,
             dimensions,
             child_exited: None,
-            child_pid,
+            child,
         })
     }
 
@@ -221,37 +340,7 @@ impl TerminalSession {
             let _ = self.loop_tx.send(Msg::Shutdown);
             return;
         }
-        let loop_tx = self.loop_tx.clone();
-
-        // Unix:两段式优雅停止 SIGHUP → 等 ~200ms → SIGKILL(参考 Conductor)。
-        // Windows:无 POSIX 信号;关闭 ConPTY(随 EventLoop drop)会让子进程收到
-        // EOF 自然退出,这里直接发 Shutdown 收尾即可。
-        #[cfg(target_family = "unix")]
-        {
-            let pid = self.child_pid;
-            if pid > 0 {
-                // 先发 SIGHUP(优雅),让子进程退出、EventLoop 有机会上报 ChildExit。
-                // SIGKILL 兜底放**后台线程**,不阻塞 UI —— 否则每次关闭 UI 死等 200ms 卡顿。
-                // Msg::Shutdown 也在后台线程延后发,避免 EventLoop 抢在 ChildExit 前就关闭。
-                unsafe {
-                    libc::kill(pid, libc::SIGHUP);
-                }
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    let alive = unsafe { libc::kill(pid, 0) == 0 };
-                    if alive {
-                        unsafe {
-                            libc::kill(pid, libc::SIGKILL);
-                        }
-                    }
-                    // 收尾:通知 EventLoop 关闭(此时 ChildExit 大概率已上报)。
-                    let _ = loop_tx.send(Msg::Shutdown);
-                });
-                return;
-            }
-        }
-
-        let _ = loop_tx.send(Msg::Shutdown);
+        platform::shutdown_child(&self.child, self.loop_tx.clone());
     }
 
     /// 锁定 Term 读取一份可渲染快照(cell 网格,含宽字符标志、颜色解析后)。
@@ -326,25 +415,6 @@ impl Drop for TerminalSession {
 
 fn pty_options_drain(opts: &PtyOptions) -> bool {
     opts.drain_on_exit
-}
-
-/// Windows:判断命令是否需要 `cmd.exe /C` 包装。
-/// `CreateProcessW` 只能执行 `.exe`;`.cmd`/`.ps1`/无扩展名的 shim(NPM/pnpm 全局
-/// 安装的 CLI 常见形式)需要通过 cmd.exe 解析 PATHEXT 才能找到并执行。
-#[cfg(target_family = "windows")]
-fn needs_cmd_wrapper(program: &str) -> bool {
-    use std::path::Path;
-    let p = Path::new(program);
-    match p.extension().and_then(|e| e.to_str()) {
-        Some(ext) => !ext.eq_ignore_ascii_case("exe"),
-        None => {
-            // 无扩展名:可能是 PATH 上的 bare name(如 "codex"),cmd.exe 会按
-            // PATHEXT 查找 .cmd/.bat 等。cmd.exe /C 让它解析。
-            // 但如果路径已存在且有 .exe(which 已解析),不需要包装。
-            // 这里简单判断:无扩展名的一律包装(让 cmd.exe 处理 PATHEXT)。
-            true
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

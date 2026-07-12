@@ -8,9 +8,6 @@ license.workspace = true
 # alacritty_terminal 自带 PTY(rustix-openpty)+ EventLoop,MVP 优先用它内建的,
 # 不必额外接 portable-pty。
 [dependencies]
-lucy-core.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
-log.workspace = true
 alacritty_terminal = "0.26"
 libc = "0.2.186"
