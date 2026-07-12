@@ -125,7 +125,6 @@ async fn sidebar_actions_have_stable_compact_hit_targets(cx: &mut TestAppContext
 #[gpui::test]
 async fn worktree_overflow_renames_through_rendered_ui(cx: &mut TestAppContext) {
     let (_dir, repo) = temp_repo();
-    let canonical_repo = std::fs::canonicalize(&repo).expect("canonical repo");
     let (workspace, window) = build_workspace(cx, Some(repo.clone()));
 
     let trigger = draw_and_get(window, &workspace, "worktree-actions-0");
@@ -135,9 +134,10 @@ async fn worktree_overflow_renames_through_rendered_ui(cx: &mut TestAppContext) 
             workspace
                 .read(cx)
                 .worktree_action_menu_for_test()
+                .and_then(std::path::Path::file_name)
                 .map(ToOwned::to_owned)
         }),
-        Some(canonical_repo),
+        repo.file_name().map(ToOwned::to_owned),
         "clicking overflow should open that row's menu"
     );
 
