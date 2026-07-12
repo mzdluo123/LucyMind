@@ -13,7 +13,7 @@
 //! 部分,当前 MVP 尚未全部用到,保留以备后续组件(悬浮项、成功态、描边控件)。
 #![allow(dead_code)]
 
-use gpui::{px, Hsla, Pixels, Rgba};
+use gpui::{px, rgb, App, Hsla, Pixels, Rgba};
 
 /// 把 0xRRGGBB 转成 gpui 颜色。
 const fn c(hex: u32) -> Rgba {
@@ -129,4 +129,28 @@ pub fn with_alpha(hex: u32, a: f32) -> Hsla {
     let mut rgba = c(hex);
     rgba.a = a;
     rgba.into()
+}
+
+/// 让 gpui-component 的控件继承 LucyMind 的视觉语言。
+///
+/// gpui-component 默认会跟随系统明暗模式，并使用 6px 圆角、阴影和自己的
+/// 配色。LucyMind 的主界面固定为冷深色，因此必须在组件库初始化后覆盖这些
+/// 全局 token；Input 的背景、文字、占位、选区和聚焦边框都会读取这里。
+pub fn configure_component_theme(cx: &mut App) {
+    let component = gpui_component::Theme::global_mut(cx);
+
+    component.mode = gpui_component::ThemeMode::Dark;
+    component.font_family = FONT_UI.into();
+    component.radius = radius();
+    component.radius_lg = radius();
+    component.shadow = false;
+
+    component.background = rgb(BG).into();
+    component.foreground = rgb(TEXT).into();
+    component.muted = rgb(SURFACE_RAISED).into();
+    component.muted_foreground = rgb(TEXT_FAINT).into();
+    component.input = rgb(BORDER).into();
+    component.ring = rgb(TEXT_DIM).into();
+    component.caret = rgb(TEXT_BRIGHT).into();
+    component.selection = with_alpha(SELECTION, SELECTION_ALPHA);
 }

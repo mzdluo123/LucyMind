@@ -240,9 +240,13 @@ impl WorkspaceView {
                     .px(theme::space_sm())
                     .py(theme::space_xs())
                     .border_1()
-                    .border_color(rgb(if on { theme::STATE_OK } else { theme::BORDER }))
+                    .border_color(rgb(if on { theme::TEXT_FAINT } else { theme::BORDER }))
                     .rounded(theme::radius())
-                    .text_color(rgb(if on { theme::STATE_OK } else { theme::TEXT_DIM }))
+                    .text_color(rgb(if on {
+                        theme::TEXT_BRIGHT
+                    } else {
+                        theme::TEXT_DIM
+                    }))
                     .child(SharedString::from(if on { "开" } else { "关" })),
             )
             .on_click(cx.listener(|this, _ev, _w, cx| {
