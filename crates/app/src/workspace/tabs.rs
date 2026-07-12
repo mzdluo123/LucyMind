@@ -2,13 +2,15 @@
 //!
 //! 作为 [`WorkspaceView`](super::WorkspaceView) 的 `impl` 方法(跨文件 impl)。
 //! - tab 栏:每个 tab = 标题(动态 OSC 0/2 优先,回退静态)+ `✕` 关闭;
-//!   末尾 `+` 按钮打开 launcher 菜单(新建 tab / 启动 agent)。active tab 顶部标记线高亮。
+//!   末尾常显 Codex / Claude / Terminal 快捷图标,`+` 按钮打开完整 launcher 菜单。
+//!   active tab 顶部标记线高亮。
 //! - launcher 菜单:`+` 按钮的下拉菜单,分 New Tab(shell 类型)和 Launch Agent 两组。
 
 use gpui::{
     div, px, rgb, Context, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled,
 };
+use gpui_component::tooltip::Tooltip;
 
 use crate::theme;
 
@@ -19,7 +21,7 @@ const TAB_BAR_H: f32 = 32.0;
 
 impl WorkspaceView {
     /// tab 栏。active worktree 无终端时返回 `h_0`(不占空间)。
-    /// 结构:`[tab_list (flex_1, overflow_x_scroll)] [+ 按钮] [reveal 按钮] (均 flex_none)`。
+    /// 结构:`[tab_list] [Codex] [Claude] [Terminal] [+] [reveal]`。
     pub(super) fn tab_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         // 无 active / 无 group / 空 tabs → 不渲染 tab 栏。
         let Some(group) = self.active.as_ref().and_then(|p| self.terminals.get(p)) else {
@@ -45,9 +47,64 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(rgb(theme::BORDER))
             .child(self.tab_list(group, cx))
+            .child(self.quick_launch_button(
+                "quick-launch-codex",
+                "icons/codex.svg",
+                "Launch Codex",
+                cx,
+                |this, cx| this.launch_agent("codex", cx),
+            ))
+            .child(self.quick_launch_button(
+                "quick-launch-claude",
+                "icons/claude.svg",
+                "Launch Claude",
+                cx,
+                |this, cx| this.launch_agent("claude", cx),
+            ))
+            .child(self.quick_launch_button(
+                "quick-launch-terminal",
+                "icons/terminal.svg",
+                "New Terminal",
+                cx,
+                |this, cx| this.new_terminal_tab(ShellKind::Default, cx),
+            ))
             .child(self.plus_button(cx))
             .child(self.reveal_button(cx))
             .into_any_element()
+    }
+
+    /// 常显的紧凑 launcher。点击区固定 32px 宽并占满 tab 栏可用高度,图标保持 14px。
+    fn quick_launch_button(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        tooltip: &'static str,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut WorkspaceView, &mut Context<WorkspaceView>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .flex_none()
+            .w(px(TAB_BAR_H))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(
+                gpui::svg()
+                    .flex_none()
+                    .size(px(14.0))
+                    .path(icon)
+                    .text_color(rgb(theme::TEXT_FAINT)),
+            )
+            .hover(|s| s.bg(rgb(theme::BTN_BG_HOVER)))
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                on_click(this, cx);
+                cx.notify();
+            }))
     }
 
     /// tab 列表(左侧):每个 tab = 标题 + `✕`。可横向滚动。
