@@ -273,13 +273,10 @@ impl WorkspaceView {
 
     /// 公共构造:填默认字段(不弹 prompt、不 set_repo)。
     fn construct(cx: &mut Context<Self>, host: Arc<dyn Host>) -> Self {
-        let registry = match Registry::load_default() {
-            Ok(registry) => registry,
-            Err(error) => {
-                log::error!("加载 session 注册表失败: {error}");
-                Registry::default()
-            }
-        };
+        let registry = Registry::load_default().unwrap_or_else(|error| {
+            log::error!("加载 session 注册表失败: {error}");
+            Registry::default()
+        });
         Self {
             repo: None,
             host,
