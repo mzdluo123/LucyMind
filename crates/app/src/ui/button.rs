@@ -1,8 +1,8 @@
 //! 可复用按钮组件 —— 消除各面板里手写重复的 `.px().py().bg().border_1()…` 样式。
 //!
 //! 设计语言(见 [`crate::theme`]):无彩 —— 深灰底 + 细描边 + 2px 微圆角,
-//! 悬浮/按下靠明度微差,不用彩色强调块。语义变体(错误/成功)只把描边与
-//! 文字染成极克制的冷红/冷绿,底仍是深灰。
+//! 悬浮/按下靠明度微差,不用彩色强调块。主操作用更亮的灰阶描边与文字，
+//! 只有危险操作保留冷红语义色。
 
 use gpui::{
     div, prelude::*, px, rgb, App, ClickEvent, ElementId, IntoElement, SharedString, Stateful,
@@ -19,7 +19,7 @@ pub enum ButtonVariant {
     Neutral,
     /// 危险动作(如「丢弃并关闭」):冷红描边 + 冷红字。
     Danger,
-    /// 确认动作(如「保存」):冷绿描边 + 冷绿字。
+    /// 确认动作(如「保存」):亮冷灰文字 + 灰阶描边。
     Confirm,
 }
 
@@ -29,7 +29,7 @@ impl ButtonVariant {
         match self {
             ButtonVariant::Neutral => (theme::BORDER, theme::TEXT),
             ButtonVariant::Danger => (theme::STATE_ERROR, theme::STATE_ERROR),
-            ButtonVariant::Confirm => (theme::STATE_OK, theme::STATE_OK),
+            ButtonVariant::Confirm => (theme::TEXT_FAINT, theme::TEXT_BRIGHT),
         }
     }
 }
@@ -209,5 +209,20 @@ impl IntoElement for Button {
         }
 
         btn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_button_is_grayscale() {
+        assert_eq!(
+            ButtonVariant::Confirm.colors(),
+            (theme::TEXT_FAINT, theme::TEXT_BRIGHT)
+        );
+        assert_ne!(ButtonVariant::Confirm.colors().0, theme::STATE_OK);
+        assert_ne!(ButtonVariant::Confirm.colors().1, theme::STATE_OK);
     }
 }

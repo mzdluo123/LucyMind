@@ -48,6 +48,7 @@ pub fn run() {
         .run(move |cx: &mut App| {
             // 初始化 gpui-component(其 Input 等组件依赖 theme/global 状态)。
             gpui_component::init(cx);
+            theme::configure_component_theme(cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(680.0)), cx);
             let host = host.clone();
